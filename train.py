@@ -146,7 +146,8 @@ def train(
         # and using the GradScaler if data type is float16
         for _ in range(gradient_accumulation_steps):
             with GLOBAL_CONTEXT:
-                logits, loss = model(train_x, train_y)
+                logits = model(train_x)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), train_y.view(-1), ignore_index=-1)
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             train_x, train_y = train_data.get_random_batch()
             # backward pass, with gradient scaling if training in fp16
