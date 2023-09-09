@@ -41,11 +41,13 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 epochs = 2
+device = torch.device("cuda:0") if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) > 0 else torch.device("cpu")
+_ = eps_model.to(device)
 
 save_path = "checkpoints"
 if not os.path.exists(save_path):
     os.makedirs(save_path, exist_ok=True)
-eval_x0 = torch.randn([16, image_channels, image_size, image_size])
+eval_x0 = torch.randn([16, image_channels, image_size, image_size]).to(device)
 
 bar_format = "{n_fmt}/{total_fmt} [{bar:30}] - ETA: {elapsed}<{remaining} {rate_fmt}{postfix}{desc}"
 for epoch_id in range(epochs):
@@ -65,7 +67,7 @@ for epoch_id in range(epochs):
             break
 
     torch.save(eps_model.state_dict(), os.path.join(save_path, "test_mnist.pt"))
-    eval_xt = ddpm.generate(x0=eval_x0, return_inner=False).permute([0, 2, 3, 1]).numpy()
+    eval_xt = ddpm.generate(x0=eval_x0, return_inner=False).permute([0, 2, 3, 1]).cpu().numpy()
     eval_xt = eval_xt[:, :, :, 0] if eval_xt.shape[-1] == 1 else eval_xt
     eval_xt = np.vstack([np.hstack(eval_xt[row * 4: row * 4 + 4]) for row in range(4)])
     eval_xt = np.clip(eval_xt, 0, 1)
