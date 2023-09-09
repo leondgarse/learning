@@ -20,6 +20,7 @@ def cifar10(image_size=32):
 
 batch_size = 16
 learning_rate = 2e-5
+device = torch.device("cuda:0") if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) > 0 else torch.device("cpu")
 
 data_loader = torch.utils.data.DataLoader(cifar10(), batch_size, shuffle=True, pin_memory=True)
 xx, _ = next(iter(data_loader))
@@ -28,6 +29,7 @@ print("image_channels = {}, image_size = {}".format(image_channels, image_size))
 print("xx.min() = {}, xx.max() = {}".format(xx.min(), xx.max()))
 
 eps_model = unet.UNet(image_channels=image_channels, n_blocks=2, n_channels=32, is_attn=[False, False, False, True])
+_ = eps_model.to(device)
 optimizer = torch.optim.Adam(eps_model.parameters(), lr=learning_rate)
 ddpm = denoise_diffusion.DenoiseDiffusion(model=eps_model)
 
@@ -40,9 +42,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-epochs = 2
-device = torch.device("cuda:0") if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) > 0 else torch.device("cpu")
-_ = eps_model.to(device)
+epochs = 20
 
 save_path = "checkpoints"
 if not os.path.exists(save_path):
@@ -56,15 +56,15 @@ for epoch_id in range(epochs):
     avg_loss = 0.0
     for batch, (xx, _) in process_bar:
         optimizer.zero_grad()
-        loss = ddpm.loss(xx)
+        loss = ddpm.loss(xx.to(device))
         loss.backward()
         optimizer.step()
 
         avg_loss += loss
         process_bar.desc = " - loss: {:.4f}".format(avg_loss / (batch + 1))
         process_bar.refresh()
-        if batch == 10:
-            break
+        # if batch == 10:
+        #     break
 
     torch.save(eps_model.state_dict(), os.path.join(save_path, "test_mnist.pt"))
     eval_xt = ddpm.generate(x0=eval_x0, return_inner=False).permute([0, 2, 3, 1]).cpu().numpy()
