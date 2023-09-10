@@ -1,5 +1,9 @@
 - [Huggingface CompVis/stable-diffusion-v-1-4-original](https://huggingface.co/CompVis/stable-diffusion-v-1-4-original)
 ```py
+# e8c7b5341445394de4fee061c34137b4  clip_model.pt
+# dd8f085ecbd26d4cb0c2a5301369b07f  diffusion_model.pt
+# 7ebbef498e4a24597125703d34be9cdc  encoder_decoder_model.pt
+
 import torch
 ss = torch.load('sd-v1-4.ckpt')
 pp = {kk.replace('model.diffusion_model.', ''): vv.half() for kk, vv in ss['state_dict'].items() if kk.startswith("model.diffusion_model.")}
