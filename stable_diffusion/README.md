@@ -3,6 +3,7 @@
 # e8c7b5341445394de4fee061c34137b4  clip_model.pt
 # dd8f085ecbd26d4cb0c2a5301369b07f  diffusion_model.pt
 # 7ebbef498e4a24597125703d34be9cdc  encoder_decoder_model.pt
+!pip install pytorch-lightning
 
 import torch
 ss = torch.load('sd-v1-4.ckpt')
@@ -12,8 +13,17 @@ torch.save(pp, 'diffusion_model.pt')
 pp = {kk.replace('cond_stage_model.transformer.', ''): vv.half() for kk, vv in ss['state_dict'].items() if kk.startswith("cond_stage_model.transformer.")}
 torch.save(pp, 'clip_model.pt')
 
-pp = {kk.replace('first_stage_model.', ''): vv.half() for kk, vv in ss['state_dict'].items() if kk.startswith("first_stage_model.")}
-torch.save(pp, 'encoder_decoder_model.pt')
+pp = {kk.replace('first_stage_model.encoder.', ''): vv.half() for kk, vv in ss['state_dict'].items() if kk.startswith("first_stage_model.encoder.")}
+torch.save(pp, 'encoder_model.pt')
+
+pp = {kk.replace('first_stage_model.', ''): vv.half() for kk, vv in ss['state_dict'].items() if kk.startswith("first_stage_model.quant_conv.")}
+torch.save(pp, 'post_encoder_model.pt')
+
+pp = {kk.replace('first_stage_model.', ''): vv.half() for kk, vv in ss['state_dict'].items() if kk.startswith("first_stage_model.post_quant_conv.")}
+torch.save(pp, 'pre_decoder_model.pt')
+
+pp = {kk.replace('first_stage_model.decoder.', ''): vv.half() for kk, vv in ss['state_dict'].items() if kk.startswith("first_stage_model.decoder.")}
+torch.save(pp, 'decoder_model.pt')
 
 !GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/openai/clip-vit-large-patch14
 ```
@@ -34,10 +44,20 @@ sampler = ddim_sampler.DDIMSampler(unet_model)  # sampler = DDPMSampler(model)
 
 # Initialize the autoencoder
 encoder = autoencoder.Encoder()
+encoder.load_state_dict(torch.load("encoder_model.pt"))
+post_encoder = autoencoder.PostEncoder()
+post_encoder.load_state_dict(torch.load("post_encoder_model.pt"))
+encoder.eval(), post_encoder.eval()
+
+pre_decoder = autoencoder.PreDecoder()
+pre_decoder.load_state_dict(torch.load("pre_decoder_model.pt"))
 decoder = autoencoder.Decoder()
-autoencoder = autoencoder.Autoencoder(encoder=encoder, decoder=decoder, emb_channels=4, z_channels=4)
-autoencoder.load_state_dict(torch.load("encoder_decoder_model.pt"))
-autoencoder.eval()
+decoder.load_state_dict(torch.load("decoder_model.pt"))
+pre_decoder.eval(), decoder.eval()
+
+# autoencoder = autoencoder.Autoencoder(encoder=encoder, decoder=decoder, emb_channels=4, z_channels=4)
+# autoencoder.load_state_dict(torch.load("encoder_decoder_model.pt"))
+# autoencoder.eval()
 
 clip_model = "clip-vit-large-patch14"
 tokenizer = CLIPTokenizer.from_pretrained(clip_model)
@@ -72,7 +92,8 @@ with torch.cuda.amp.autocast():
     # `x` will be of shape `[batch_size, c, h / f, w / f]`
     x = sampler.sample(cond=cond, shape=[batch_size, c, height // f, width // f], uncond_scale=uncond_scale, uncond_cond=un_cond)
     # Decode the image from the [autoencoder](../model/autoencoder.html)
-    images = autoencoder.decode(x / latent_scaling_factor)
+    latent = pre_decoder(x / latent_scaling_factor)
+    images = decoder(latent)
 
 # Save images
 images = torch.clamp((images + 1.0) / 2.0, min=0.0, max=1.0).cpu().permute(0, 2, 3, 1).numpy()

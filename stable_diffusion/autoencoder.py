@@ -22,40 +22,48 @@ import torch.nn.functional as F
 from torch import nn
 
 
-class Autoencoder(nn.Module):
-    def __init__(self, encoder, decoder, emb_channels=4, z_channels=4):
+class GaussianDistribution:
+    """
+    ## Gaussian Distribution
+    """
+
+    def __init__(self, parameters: torch.Tensor):
         """
-        :param emb_channels: is the number of dimensions in the quantized embedding space
-        :param z_channels: is the number of channels in the embedding space
+        :param parameters: are the means and log of variances of the embedding of shape
+            `[batch_size, z_channels * 2, z_height, z_height]`
         """
+        # Split mean and log of variance
+        self.mean, log_var = torch.chunk(parameters, 2, dim=1)
+        # Clamp the log of variances
+        self.log_var = torch.clamp(log_var, -30.0, 20.0)
+        # Calculate standard deviation
+        self.std = torch.exp(0.5 * self.log_var)
+
+    def sample(self):
+        # Sample from the distribution
+        return self.mean + self.std * torch.randn_like(self.std)
+
+
+class PostEncoder(nn.Module):
+    def __init__(self, emb_channels=4, z_channels=4):
         super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
         # Convolution to map from embedding space to quantized embedding space moments (mean and log variance)
         self.quant_conv = nn.Conv2d(2 * z_channels, 2 * emb_channels, 1)
+
+    def forward(self, z):
+        moments = self.quant_conv(z)  # Get the moments in the quantized embedding space
+        return GaussianDistribution(moments)  # Return the distribution
+
+class PreDecoder(nn.Module):
+    def __init__(self, emb_channels=4, z_channels=4):
+        super().__init__()
         # Convolution to map from quantized embedding space back to embedding space
         self.post_quant_conv = nn.Conv2d(emb_channels, z_channels, 1)
 
-    def encode(self, img: torch.Tensor) -> 'GaussianDistribution':
-        """ Encode images to latent representation
-        :param img: is the image tensor with shape `[batch_size, img_channels, img_height, img_width]`
-        """
-        # Get embeddings with shape `[batch_size, z_channels * 2, z_height, z_height]`
-        z = self.encoder(img)
-        # Get the moments in the quantized embedding space
-        moments = self.quant_conv(z)
-        # Return the distribution
-        return GaussianDistribution(moments)
+    def forward(self, z):
+        return self.post_quant_conv(z)
 
-    def decode(self, z: torch.Tensor):
-        """ Decode images from latent representation
-        :param z: is the latent representation with shape `[batch_size, emb_channels, z_height, z_height]`
-        """
-        # Map to embedding space from the quantized representation
-        z = self.post_quant_conv(z)
-        # Decode the image of shape `[batch_size, channels, height, width]`
-        return self.decoder(z)
-
+""" Encoder Decoder """
 
 class Encoder(nn.Module):
     """
@@ -232,28 +240,6 @@ class Decoder(nn.Module):
 
         #
         return img
-
-
-class GaussianDistribution:
-    """
-    ## Gaussian Distribution
-    """
-
-    def __init__(self, parameters: torch.Tensor):
-        """
-        :param parameters: are the means and log of variances of the embedding of shape
-            `[batch_size, z_channels * 2, z_height, z_height]`
-        """
-        # Split mean and log of variance
-        self.mean, log_var = torch.chunk(parameters, 2, dim=1)
-        # Clamp the log of variances
-        self.log_var = torch.clamp(log_var, -30.0, 20.0)
-        # Calculate standard deviation
-        self.std = torch.exp(0.5 * self.log_var)
-
-    def sample(self):
-        # Sample from the distribution
-        return self.mean + self.std * torch.randn_like(self.std)
 
 
 class AttnBlock(nn.Module):
