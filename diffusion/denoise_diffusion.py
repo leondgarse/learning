@@ -2,7 +2,7 @@ import torch
 
 
 class DenoiseDiffusion:
-    def __init__(self, model, n_steps=100):
+    def __init__(self, model, n_steps=1000):
         self.model, self.n_steps = model, n_steps
         self.device = next(model.parameters()).device
 
