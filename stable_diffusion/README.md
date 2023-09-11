@@ -1,3 +1,7 @@
+- [Paper 2112.10752 High-Resolution Image Synthesis with Latent Diffusion Models](https://arxiv.org/abs/2112.10752)
+- [Github CompVis/stable-diffusion](https://github.com/CompVis/stable-diffusion)
+- [Github stability-ai/stablediffusion](https://github.com/stability-ai/stablediffusion)
+- [Github labmlai/annotated_deep_learning_paper_implementations/stable_diffusion](https://github.com/labmlai/annotated_deep_learning_paper_implementations/tree/master/labml_nn/diffusion/stable_diffusion)
 - [Huggingface CompVis/stable-diffusion-v-1-4-original](https://huggingface.co/CompVis/stable-diffusion-v-1-4-original)
 ```py
 # e8c7b5341445394de4fee061c34137b4  clip_model.pt

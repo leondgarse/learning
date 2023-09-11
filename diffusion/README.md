@@ -1,7 +1,8 @@
 # Learning
 ***
-
-- [Github labmlai/annotated_deep_learning_paper_implementations](https://github.com/labmlai/annotated_deep_learning_paper_implementations)
+- [2006.11239](https://arxiv.org/abs/2006.11239)
+- [Github hojonathanho/diffusion](https://github.com/hojonathanho/diffusion)
+- [Github labmlai/annotated_deep_learning_paper_implementations/diffusion](https://github.com/labmlai/annotated_deep_learning_paper_implementations/tree/master/labml_nn/diffusion/ddpm)
 ```py
 import torch
 import torchvision
