@@ -1,4 +1,5 @@
 import torch
+from tqdm.auto import tqdm
 
 
 class DenoiseDiffusion:
@@ -42,7 +43,7 @@ class DenoiseDiffusion:
 
         rr = []
         with torch.no_grad():
-            for iter in range(self.n_steps):
+            for iter in tqdm(range(self.n_steps)):
                 timestep -= 1
                 xt = self.diffusion_sample(xt, timestep)
                 if return_inner:

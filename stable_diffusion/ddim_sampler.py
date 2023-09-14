@@ -6,6 +6,7 @@ from typing import Optional, List
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 class DDIMSampler:
     def __init__(self, unet_model, n_steps=50, n_steps_training=1000, ddim_discretize="uniform", linear_start=0.00085, linear_end=0.0120, ddim_eta=0.):
@@ -16,6 +17,9 @@ class DDIMSampler:
         :param ddim_discretize: specifies how to extract $\tau$ from $[1,2,\dots,T]$. It can be either `uniform` or `quad`.
         :param ddim_eta: is $\eta$ used to calculate $\sigma_{\tau_i}$. $\eta = 0$ makes the sampling process deterministic.
         """
+        self.unet_model = unet_model
+        self.device = next(unet_model.parameters()).device
+
         if ddim_discretize == 'uniform':
             c = n_steps_training // n_steps
             self.time_steps = np.asarray(list(range(0, n_steps_training, c))) + 1
@@ -25,6 +29,7 @@ class DDIMSampler:
             raise NotImplementedError(ddim_discretize)
 
         beta = torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_steps_training, dtype=torch.float64) ** 2
+        beta = beta.to(self.device)
         alpha = 1. - beta
         alpha_bar = torch.cumprod(alpha, dim=0).float()
 
@@ -34,9 +39,6 @@ class DDIMSampler:
         ddim_sigma = ((1 - self.ddim_alpha_prev) / (1 - self.ddim_alpha) * (1 - self.ddim_alpha / self.ddim_alpha_prev)) ** .5
         self.ddim_sigma = ddim_eta * ddim_sigma
         self.ddim_sqrt_one_minus_alpha = (1. - self.ddim_alpha) ** .5
-
-        self.unet_model = unet_model
-        self.device = next(unet_model.parameters()).device
 
     def get_eps(self, xt, timestep, cond, uncond_scale=1, uncond_cond=None):
         """ xt: [batch_size, channels, height, width], timestep: [batch_size], cond: [batch_size, emb_size]"""
@@ -56,15 +58,15 @@ class DDIMSampler:
         sigma = self.ddim_sigma[index]
         sqrt_one_minus_alpha = self.ddim_sqrt_one_minus_alpha[index]
 
-        pred_x0 = (x - sqrt_one_minus_alpha * e_t) / (alpha ** 0.5)  # Current prediction for x_0
+        pred_x0 = (xt - sqrt_one_minus_alpha * e_t) / (alpha ** 0.5)  # Current prediction for x_0
         dir_xt = (1. - alpha_prev - sigma ** 2).sqrt() * e_t  # Direction pointing to x_t
 
-        noise = 0. if sigma == 0 else (torch.randn((1, *x.shape[1:])) if repeat_noise else torch.randn(x.shape))
+        noise = 0. if sigma == 0 else (torch.randn((1, *x.shape[1:])).to(self.device) if repeat_noise else torch.randn(x.shape).to(self.device))
         x_prev = (alpha_prev ** 0.5) * pred_x0 + dir_xt + sigma * temperature * noise
         return x_prev, pred_x0
 
     @torch.no_grad()
-    def sample(self, shape, cond, repeat_noise=False, temperature=1., x_last=None, uncond_scale=1., uncond_cond=None, skip_steps=0):
+    def sample(self, shape, cond, repeat_noise=False, temperature=1., x_last=None, uncond_scale=1., uncond_cond=None, skip_steps=0, return_inner=False):
         """
         :param shape: is the shape of the generated images in the form `[batch_size, channels, height, width]`
         :param cond: is the conditional embeddings $c$ of shape `[batch_size, emb_size]`
@@ -77,15 +79,19 @@ class DDIMSampler:
         """
         bs = shape[0]
         x = x_last if x_last is not None else torch.randn(shape)
+        x = x.to(self.device)
         time_steps = np.flip(self.time_steps)[skip_steps:]
 
-        for i, step in enumerate(time_steps):
+        rr = []
+        for i, step in tqdm(enumerate(time_steps), total=len(time_steps)):
             index = len(time_steps) - i - 1  # Index $i$ in the list $[\tau_1, \tau_2, \dots, \tau_S]$
-            ts = x.new_full((bs,), step, dtype=torch.long)  # Time step $\tau_i$
+            ts = x.new_full((bs,), step, dtype=torch.long).to(self.device)  # Time step $\tau_i$
 
             e_t = self.get_eps(x, ts, cond, uncond_scale=uncond_scale, uncond_cond=uncond_cond)
             x, pred_x0 = self.get_x_prev_and_pred_x0(e_t, index, x, temperature=temperature, repeat_noise=repeat_noise)
-        return x
+            if return_inner:
+                rr.append(x)
+        return rr if return_inner else x
 
     @torch.no_grad()
     def q_sample(self, x0: torch.Tensor, index: int, noise: Optional[torch.Tensor] = None):
