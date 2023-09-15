@@ -8,11 +8,41 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import CIFAR10
 from torchvision.utils import save_image
+from torch.optim.lr_scheduler import _LRScheduler
 
-from Diffusion import GaussianDiffusionSampler, GaussianDiffusionTrainer
-from Diffusion.Model import UNet
-from Scheduler import GradualWarmupScheduler
+from diffusion import GaussianDiffusionSampler, GaussianDiffusionTrainer
+from unet import UNet
 
+
+class GradualWarmupScheduler(_LRScheduler):
+    def __init__(self, optimizer, multiplier, warm_epoch, after_scheduler=None):
+        self.multiplier = multiplier
+        self.total_epoch = warm_epoch
+        self.after_scheduler = after_scheduler
+        self.finished = False
+        self.last_epoch = None
+        self.base_lrs = None
+        super().__init__(optimizer)
+
+    def get_lr(self):
+        if self.last_epoch > self.total_epoch:
+            if self.after_scheduler:
+                if not self.finished:
+                    self.after_scheduler.base_lrs = [base_lr * self.multiplier for base_lr in self.base_lrs]
+                    self.finished = True
+                return self.after_scheduler.get_lr()
+            return [base_lr * self.multiplier for base_lr in self.base_lrs]
+        return [base_lr * ((self.multiplier - 1.) * self.last_epoch / self.total_epoch + 1.) for base_lr in self.base_lrs]
+
+
+    def step(self, epoch=None, metrics=None):
+        if self.finished and self.after_scheduler:
+            if epoch is None:
+                self.after_scheduler.step(None)
+            else:
+                self.after_scheduler.step(epoch - self.total_epoch)
+        else:
+            return super(GradualWarmupScheduler, self).step(epoch)
 
 def train(modelConfig: Dict):
     device = torch.device(modelConfig["device"])
@@ -88,3 +118,33 @@ def eval(modelConfig: Dict):
         sampledImgs = sampledImgs * 0.5 + 0.5  # [0 ~ 1]
         save_image(sampledImgs, os.path.join(
             modelConfig["sampled_dir"],  modelConfig["sampledImgName"]), nrow=modelConfig["nrow"])
+
+
+
+if __name__ == '__main__':
+    modelConfig = {
+        "state": "train", # or eval
+        "epoch": 200,
+        "batch_size": 80,
+        "T": 1000,
+        "channel": 128,
+        "channel_mult": [1, 2, 3, 4],
+        "attn": [2],
+        "num_res_blocks": 2,
+        "dropout": 0.15,
+        "lr": 1e-4,
+        "multiplier": 2.,
+        "beta_1": 1e-4,
+        "beta_T": 0.02,
+        "img_size": 32,
+        "grad_clip": 1.,
+        "device": "cuda:0" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "cpu",
+        "training_load_weight": None,
+        "save_weight_dir": "./Checkpoints/",
+        "test_load_weight": "ckpt_199_.pt",
+        "sampled_dir": "./SampledImgs/",
+        "sampledNoisyImgName": "NoisyNoGuidenceImgs.png",
+        "sampledImgName": "SampledNoGuidenceImgs.png",
+        "nrow": 8
+    }
+    train(modelConfig)
