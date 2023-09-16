@@ -43,7 +43,7 @@ class DDIMSampler:
     def get_eps(self, xt, timestep, cond, uncond_scale=1, uncond_cond=None):
         """ xt: [batch_size, channels, height, width], timestep: [batch_size], cond: [batch_size, emb_size]"""
         if uncond_cond is None or uncond_scale == 1.:
-            return self.unet_model(xt, timestep, cond_embeddings)
+            return self.unet_model(xt, timestep, cond)
 
         x_in = torch.cat([xt] * 2)
         t_in = torch.cat([timestep] * 2)
