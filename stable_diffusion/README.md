@@ -118,10 +118,10 @@ prompt = "a photo of an astonaut riding a horse on mars"
 prompts = batch_size * [prompt]  # Make a batch of prompts
 
 with torch.no_grad(), global_context:
-    un_cond = prompt_embedding(batch_size * [""], clip_text_embedder, tokenizer)  # get the embeddings for empty prompts (no conditioning).
+    uncond_cond = prompt_embedding(batch_size * [""], clip_text_embedder, tokenizer)  # get the embeddings for empty prompts (no conditioning).
     cond = prompt_embedding(prompts, clip_text_embedder, tokenizer)  # Get the prompt embeddings
     # Sample in the latent space. `x` will be of shape `[batch_size, c, h / f, w / f]`
-    x = sampler.sample(cond=cond, shape=[batch_size, c, height // f, width // f], uncond_scale=uncond_scale, uncond_cond=un_cond)
+    x = sampler.sample(cond=cond, shape=[batch_size, c, height // f, width // f], uncond_scale=uncond_scale, uncond_cond=uncond_cond)
     # Decode the image
     latent = pre_decoder(x / latent_scaling_factor)
     images = decoder(latent)

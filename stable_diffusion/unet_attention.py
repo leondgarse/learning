@@ -70,14 +70,14 @@ class BasicTransformerBlock(nn.Module):
         """
         super().__init__()
         # Self-attention layer and pre-norm layer
-        self.attn1 = CrossAttention(d_model, d_model, n_heads, d_head)
         self.norm1 = nn.LayerNorm(d_model)
+        self.attn1 = CrossAttention(d_model, d_model, n_heads, d_head)
         # Cross attention layer and pre-norm layer
-        self.attn2 = CrossAttention(d_model, d_cond, n_heads, d_head)
         self.norm2 = nn.LayerNorm(d_model)
+        self.attn2 = CrossAttention(d_model, d_cond, n_heads, d_head)
         # Feed-forward network and pre-norm layer
-        self.ff = FeedForward(d_model)
         self.norm3 = nn.LayerNorm(d_model)
+        self.ff = FeedForward(d_model)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor):
         """
