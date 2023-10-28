@@ -1,3 +1,4 @@
+- [Github facebookresearch/segment-anything(https://github.com/facebookresearch/segment-anything)
 - [Github ChaoningZhang/MobileSAM](https://github.com/ChaoningZhang/MobileSAM)
 ```py
 !wget https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt
@@ -17,19 +18,10 @@ image_encoder = TinyViT(img_size=1024)
 prompt_encoder = PromptEncoder()
 mask_decoder = MaskDecoder(transformer=TwoWayTransformer())
 
-class Sam(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.image_encoder = image_encoder
-        self.prompt_encoder = prompt_encoder
-        self.mask_decoder = mask_decoder
-
-    def forward(self):
-        pass
-
-mm = Sam()
-mm.load_state_dict(torch.load("mobile_sam.pt"))
-
+ss = torch.load("mobile_sam.pt")
+image_encoder.load_state_dict({kk[len('image_encoder.'):]: vv for kk, vv in ss.items() if kk.startswith('image_encoder.')})
+prompt_encoder.load_state_dict({kk[len('prompt_encoder.'):]: vv for kk, vv in ss.items() if kk.startswith('prompt_encoder.')})
+mask_decoder.load_state_dict({kk[len('mask_decoder.'):]: vv for kk, vv in ss.items() if kk.startswith('mask_decoder.')})
 
 def preprocess(inputs, image_encoder_size=1024) -> torch.Tensor:
     """Normalize pixel values and pad to a square input."""
@@ -131,7 +123,33 @@ image = astronaut()
 point_coords = np.array([[400, 400]])
 point_labels = np.array([1])
 features, original_size, input_size = set_image(image)
-masks_np, iou_predictions_np, low_res_masks_np = predict(features, original_size, input_size)
-print(features.shape, original_size, input_size, masks_np.shape, iou_predictions_np.shape, low_res_masks_np.shape)
+masks, iou_predictions, low_res_masks = predict(features, original_size, input_size)
+print(features.shape, original_size, input_size, masks.shape, iou_predictions.shape, low_res_masks.shape)
 # torch.Size([1, 256, 64, 64]) (1367, 2048) (684, 1024) (3, 1367, 2048) (3,) (3, 256, 256)
+```
+```py
+def show_mask(mask, ax, random_color=False):
+    color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0) if random_color else np.array([30/255, 144/255, 255/255, 0.6])
+    mask_image = np.expand_dims(mask, -1) * color.reshape(1, 1, -1)
+    ax.imshow(mask_image)
+
+def show_points(coords, labels, ax, marker_size=375):
+    pos_points, neg_points = coords[labels==1], coords[labels==0]
+    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
+
+def show_box(box, ax):
+    x0, y0 = box[0], box[1]
+    w, h = box[2] - box[0], box[3] - box[1]
+    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))    
+
+for id, (mask, iou_prediction) in enumerate(zip(masks, iou_predictions)):
+    fig = plt.figure(figsize=(10,10))
+    plt.imshow(image)
+    show_mask(mask, plt.gca())
+    show_points(point_coords, point_labels, plt.gca())
+    plt.title(f"Mask {id+1}, Score: {iou_prediction:.3f}", fontsize=18)
+    plt.axis('off')
+    plt.show()
+fig.savefig('aa.jpg')
 ```
