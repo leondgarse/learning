@@ -123,6 +123,8 @@ image = astronaut()
 point_coords = np.array([[400, 400]])
 point_labels = np.array([1])
 features, original_size, input_size = set_image(image)
+# (torch.Size([1, 256, 64, 64]), (1024, 1024), (512, 512))
+
 masks, iou_predictions, low_res_masks = predict(features, original_size, input_size)
 print(features.shape, original_size, input_size, masks.shape, iou_predictions.shape, low_res_masks.shape)
 # torch.Size([1, 256, 64, 64]) (1367, 2048) (684, 1024) (3, 1367, 2048) (3,) (3, 256, 256)

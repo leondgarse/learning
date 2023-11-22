@@ -111,6 +111,9 @@ def predict(features, original_size, input_size, image_encoder_size=1024, multim
     return masks_np, iou_predictions_np, low_res_masks_np
 
 
+""" Split """
+
+
 class PositionEmbeddingRandom:
     def __init__(self, num_pos_feats=64, scale=-1):
         self.scale = scale if scale > 0 else 1
@@ -157,7 +160,7 @@ def BoxesEncoder(embed_dim=256):
     return lambda xx: initializers.zeros()([xx.shape[0], embed_dim])
 
 def MasksEncoder(embed_dim=256, mask_in_chans=16):
-    inptus = layers.Input([])
+    inptus = layers.Input([None, None])
     conv2d_no_bias(1, mask_in_chans // 4, kernel_size=2, stride=2),
     mask_downscaling = models.Sequential([
         LayerNorm2d(mask_in_chans // 4),
@@ -183,15 +186,45 @@ class SAM:
             nn.Conv2d(mask_in_chans, embed_dim, kernel_size=1),
         )
 
+        scale, num_pos_feats = 1.0, 64
+        scale = 1.0 if scale is None or scale <= 0.0 else scale
+        self.positional_encoding_gaussian_matrix = scale * np.random.normal(size=[2, num_pos_feats])
+
+    def _pe_encoding(self, coords):
+        """Positionally encode points that are normalized to [0,1]."""
+        # assuming coords are in [0, 1]^2 square and have d_1 x ... x d_n x 2 shape
+        coords = 2 * coords - 1
+        coords = coords @ self.positional_encoding_gaussian_matrix
+        coords = 2 * np.pi * coords
+        # outputs d_1 x ... x d_n x C shape
+        return torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1)
+
+    def forward(self, size):
+        """Generate positional encoding for a grid of the specified size."""
+        h, w = size
+        device: Any = self.positional_encoding_gaussian_matrix.device
+        grid = torch.ones((h, w), device=device, dtype=torch.float32)
+        y_embed = grid.cumsum(dim=0) - 0.5
+        x_embed = grid.cumsum(dim=1) - 0.5
+        y_embed = y_embed / h
+        x_embed = x_embed / w
+
+        pe = self._pe_encoding(torch.stack([x_embed, y_embed], dim=-1))
+        return pe.permute(2, 0, 1)  # C x H x W
+
+    def normalize_coords(self, coords):
+        coords = coords / [self.input_image_size[1], self.input_image_size[0]]
+        coords = (2 * coords - 1) * (2 * np.pi)
+        coords = coords @ self.positional_encoding_gaussian_matrix
+        return np.concatenate([np.sin(coords), np.cos(coords)], axis=-1)
+
     def _embed_points(self, points, labels, pad=False):
         """Embeds point prompts."""
         points = points + 0.5  # Shift to center of pixel
         if pad:
-            padding_point = torch.zeros((points.shape[0], 1, 2), device=points.device)
-            padding_label = -torch.ones((labels.shape[0], 1), device=labels.device)
-            points = torch.cat([points, padding_point], dim=1)
-            labels = torch.cat([labels, padding_label], dim=1)
-        point_embedding = self.pe_layer.forward_with_coords(points, self.input_image_size)
+            points = np.pad(points, [[0, 0], [0, 1], [0, 0]])
+            labels = np.pad(labels, [[0, 0], [0, 1]], constant_values=-1)
+        point_embedding = self.normalize_coords(points)
         point_embedding[labels == -1] = 0.0
         point_embedding[labels == -1] += self.not_a_point_embed.weight
         point_embedding[labels == 0] += self.point_embeddings[0].weight
@@ -219,7 +252,13 @@ class SAM:
         masks_inputs = self._embed_masks(masks) if masks is not None else np.empty([batch_size, 0, 256, 256, 1])
         # sparse_embeddings, dense_embeddings = functional.concat([points_inputs, boxes_inputs]), masks_inputs
 
-
+        low_res_masks, iou_predictions = mask_decoder(
+            image_embeddings=features,
+            image_pe=prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=multimask_output,
+        )
 
 
 
