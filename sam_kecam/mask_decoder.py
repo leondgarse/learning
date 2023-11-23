@@ -131,7 +131,7 @@ def MaskDecoder(embed_dims=256, num_mask_tokens=4):
     sparse_prompt_embedding = layers.Input([1, embed_dims], batch_size=1)
     dense_prompt_embedding = layers.Input([1, 1, embed_dims], batch_size=1)
 
-    tokens = ClassToken()(sparse_prompt_embedding)
+    tokens = ClassToken(num_tokens=5)(sparse_prompt_embedding)
     src = image_embedding + dense_prompt_embedding
     iou_masks, src = two_way_transformer(src, image_position_embedding, tokens)
 

@@ -98,6 +98,7 @@ def predict(features, original_size, input_size, image_encoder_size=1024, multim
     # Embed prompts
     points = None if points is None else (points, labels)
     sparse_embeddings, dense_embeddings = prompt_encoder(points=points, boxes=boxes, masks=mask_inputs)
+    # (torch.Size([1, 2, 256]), torch.Size([1, 256, 64, 64]))
 
     # Predict masks
     low_res_masks, iou_predictions = mask_decoder(
