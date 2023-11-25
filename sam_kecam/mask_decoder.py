@@ -22,130 +22,92 @@ from keras_cv_attention_models.attention_layers import (
 from keras_cv_attention_models.download_and_load import reload_model_weights
 
 
-class RandomFrequencyPositionalEmbeddings(keras.layers.Layer):
-    """Positional encoding using random spatial frequencies, maps coordinates/points in 2D space to positional encodings using random spatial frequencies."""
-    def __init__(self, num_positional_features, scale, **kwargs):
-        super().__init__(**kwargs)
-        self.num_positional_features, self.scale = num_positional_features, scale
-
-    def build(self, input_shape=None):
-        self.height, self.width = input_shape[1:-1] if backend.image_data_format() == "channels_last" else input_shape[2:]
-        positional_encoding = np.random.normal(size=(2, self.num_positional_features)).astype("float32")
-        if hasattr(self, "register_buffer"):  # PyTorch
-            self.register_buffer("positional_encoding", functional.convert_to_tensor(positional_encoding, dtype=self.compute_dtype), persistent=False)
-        else:
-            self.positional_encoding = functional.convert_to_tensor(positional_encoding, dtype=self.compute_dtype)
-        super().build(input_shape)
-
-    def call(self, inputs):
-        return self.encode_image(inputs)
-
-    def __positional_encodings(self, coords):
-        coords = coords * 2 - 1
-        coords = coords @ self.positional_encoding_gaussian_matrix
-        coords = coords * (2 * math.pi)
-        return ops.concatenate([ops.sin(coords), ops.cos(coords)], axis=-1)
-
-    def encode_image(self, size):
-        """Generate a positional encoding for an image of any given size."""
-        H, W = size
-        grid = ops.ones(shape=(H, W), dtype=self.dtype)
-        y_embed = ops.cumsum(grid, axis=0) - 0.5
-        x_embed = ops.cumsum(grid, axis=1) - 0.5
-        y_embed = y_embed / ops.cast(H, self.dtype)
-        x_embed = x_embed / ops.cast(W, self.dtype)
-        return self.__positional_encodings(ops.stack([x_embed, y_embed], axis=-1))
-
-    def encode_coordinates(self, coords_input, image_size):
-        """Positionally encode points that are not normalized to `[0, 1]`."""
-        coords_normalized = ops.stack([coords_input[..., 0] / image_size[1], coords_input[..., 1] / image_size[0]], axis=-1)
-        return self.__positional_encodings(coords_normalized)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"num_positional_features": self.num_positional_features, "scale": self.scale})
-        return config
-
-
-def attention(inputs, condition=None, num_heads=4, head_dim=0, name=""):
-    _, bb, cc = inputs.shape
+def attention(query, key=None, value=None, num_heads=4, head_dim=0, name=""):
+    _, bb, cc = query.shape
     head_dim = head_dim if head_dim > 0 else cc // num_heads
     emded_dim = int(num_heads * head_dim)
-    condition = inputs if condition is None else condition
 
-    query = layers.Dense(emded_dim, use_bias=False, name=name and name + "query")(inputs)
-    key = layers.Dense(emded_dim, use_bias=False, name=name and name + "key")(condition)
-    value = layers.Dense(emded_dim, use_bias=False, name=name and name + "value")(condition)
+    query = layers.Dense(emded_dim, use_bias=False, name=name and name + "query")(query)
+    key = layers.Dense(emded_dim, use_bias=False, name=name and name + "key")(query if key is None else key)
+    value = layers.Dense(emded_dim, use_bias=False, name=name and name + "value")(query if value is None else value)
 
     query, key, value = qkv_to_multi_head_channels_last_format(query, key, value, num_heads, data_format="channels_last")
     output_shape = [-1, -1 if bb is None else bb, cc]
     return scaled_dot_product_attention(query, key, value, output_shape, out_weight=True, out_bias=True, name=name)
 
 
-def two_way_attention_block(query, key, query_position, key_position, downsample_rate=2, skip_first_layer_pe=False, name=""):
+def two_way_attention_block(
+    query, key, query_position, key_position, num_heads=4, downsample_rate=2, skip_first_layer_pe=False, mlp_ratio=8, activation="relu", name=""
+):
     if skip_first_layer_pe:
-        query = attention(query, downsample_rate=downsample_rate, name=name)
+        query = attention(query, downsample_rate=downsample_rate, name=name + "query_")
     else:
-        attn_out = attention(query + query_position, value=query, name=name)
+        attn_out = attention(query + query_position, value=query, name=name + "query_")
         query = query + attn_out
-    query = layer_norm(query)
+    query = layer_norm(query, name=name + "query_")
 
     # Cross attention block, tokens attending to image embedding
     query_with_pe = query + query_position
     key_with_pe = key + key_position
-    attn_out = attention(query_with_pe, key=key_with_pe, value=key, downsample_rate=downsample_rate, name=name)
+    head_dim = query.shape[-1] // num_heads // downsample_rate
+    attn_out = attention(query_with_pe, key=key_with_pe, value=key, num_heads=num_heads, head_dim=head_dim, name=name + "cross_embedding_")
     query = query + attn_out
-    query = layer_norm(query)
+    query = layer_norm(query, name=name + "cross_embedding_")
 
     # MLP block
-    mlp_out = mlp_block(query)
+    mlp_out = mlp_block(query, hidden_dim=int(query.shape[-1] * mlp_ratio), activation=activation, name=name + "mlp_")
     query = query + mlp_out
-    query = layer_norm(query)
+    query = layer_norm(query, name=name + "mlp_")
 
     # Cross attention block, image embedding attending to tokens
     query_with_pe = query + query_position
-    attn_out = attention(key_with_pe, key=query_with_pe, value=query, downsample_rate=downsample_rate, name=name)
+    attn_out = attention(key_with_pe, key=query_with_pe, value=query, head_dim=head_dim, name=name + "cross_tokens_")
     key = key + attn_out
-    key = layer_norm(key)
+    key = layer_norm(key, name=name + "cross_tokens_")
     return query, key
 
 
 def two_way_transformer(
-    image_embedding, image_position, query_position, depth=2, num_heads=8, embedding_dim=256, mlp_dim=2048, downsample_rate=2, activation="relu", name=""
+    image_embedding, image_position, point_embedding, depth=2, num_heads=8, mlp_dim=2048, downsample_rate=2, mlp_ratio=8, activation="relu", name=""
 ):
-    query, key = query_position, image_embedding
+    query, key, query_position, key_position = point_embedding, image_embedding, point_embedding, image_position
     for ii in range(depth):
-        query, key = two_way_attention_block(query=query, key=key, query_position=query_position, key_position=image_position, name=name)
+        skip_first_layer_pe = True if ii == 0 else False
+        query, key = two_way_attention_block(
+            query, key, query_position, key_position, num_heads, downsample_rate, skip_first_layer_pe, mlp_ratio, activation, name=name + "{}_".format(ii)
+        )
 
-    query_with_pe = query + query_positional
-    key_with_pe = key + key_positional
-    attn_out = attention(query_with_pe, key=key_with_pe, value=key, downsample_rate=downsample_rate, name=name)
+    query_with_pe = query + query_position
+    key_with_pe = key + key_position
+    head_dim = query.shape[-1] // num_heads // downsample_rate
+    attn_out = attention(query_with_pe, key=key_with_pe, value=key, num_heads=num_heads, head_dim=head_dim, name=name + "token_to_image_")
     query = query + attn_out
-    query = layer_norm(query)
+    query = layer_norm(query, name=name + "token_to_image_")
     return query, key
 
 
-def MaskDecoder(embed_dims=256, num_mask_tokens=4):
+def MaskDecoder(embed_dims=256, num_mask_tokens=4, name="mask_decoder"):
     image_embedding = layers.Input([None, None, embed_dims], batch_size=1)
-    image_position_embedding = layers.Input([embed_dims], batch_size=1)
-    sparse_prompt_embedding = layers.Input([1, embed_dims], batch_size=1)
-    dense_prompt_embedding = layers.Input([1, 1, embed_dims], batch_size=1)
+    point_embedding = layers.Input([None, embed_dims], batch_size=1)
+    image_position = layers.Input([None, None, embed_dims], batch_size=1)
 
-    tokens = ClassToken(num_tokens=5)(sparse_prompt_embedding)
-    src = image_embedding + dense_prompt_embedding
-    iou_masks, src = two_way_transformer(src, image_position_embedding, tokens)
+    point_embedding_with_tokens = ClassToken(num_tokens=5, name="cls_token")(point_embedding)
+    iou_masks, encoded_image_embedding = two_way_transformer(image_embedding, image_position, point_embedding_with_tokens, name="attn_")
 
     # output_upscaling
-    src = layers.ConvTranspose2d()(src)
-    src = layers.LayerNormalization()(src)
-    src = activation_by_name(src, activation=activation)
-    src = layers.ConvTranspose2d()(src)
-    upscaled_embedding = activation_by_name(src, activation=activation)
+    encoded_image_embedding = layers.ConvTranspose2d(embed_dims // 4, kernel_size=2, strides=2, name="up_1_conv_transpose")(encoded_image_embedding)
+    encoded_image_embedding = layer_norm(encoded_image_embedding)
+    encoded_image_embedding = activation_by_name(encoded_image_embedding, activation=activation)
+    encoded_image_embedding = layers.ConvTranspose2d(embed_dims // 8, kernel_size=2, strides=2, name="up_2_conv_transpose")(encoded_image_embedding)
+    upscaled_image_embedding = activation_by_name(encoded_image_embedding, activation=activation)
 
     iou_token_out, masks_top, masks_left, masks_bottom, masks_right = functional.unstack(iou_masks, axis=1)
+    hyper_in = []
+    for id, (ii, name) in enumerate(zip([masks_top, masks_left, masks_bottom, masks_right], ["top", "left", "bottom", "right"])):
+        hyper_in.append(mlp_block(embed_dims, hidden_dim=embed_dims, output_channel=embed_dims, activation=activation, name="masks_" + name))
     iou_pred = mlp_block(iou_token_out)
-    hyper_in = [mlp_block(ii) for id, ii in enumerate([masks_top, masks_left, masks_bottom, masks_right])]
+    hyper_in = [ for ]
     hyper_in = functional.stack(hyper_in, axis=1)
-    masks = hyper_in @ upscaled_embedding
+    masks = hyper_in @ upscaled_image_embedding
 
-    return masks, iou_pred
+    return models.Model([image_with_masks_inputs, sparse_prompt_embedding, image_position_embedding], [masks, iou_pred], name=name)
