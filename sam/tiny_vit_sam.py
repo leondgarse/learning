@@ -324,10 +324,8 @@ class TinyViTBlock(nn.Module):
             x = self.attn(x)
         else:
             x = x.view(B, H, W, C)
-            pad_b = (self.window_size - H %
-                     self.window_size) % self.window_size
-            pad_r = (self.window_size - W %
-                     self.window_size) % self.window_size
+            pad_b = (self.window_size - H % self.window_size) % self.window_size
+            pad_r = (self.window_size - W % self.window_size) % self.window_size
             padding = pad_b > 0 or pad_r > 0
 
             if padding:
@@ -583,12 +581,12 @@ class TinyViT(nn.Module):
             x = layer(x)
         B,_,C=x.size()
         x = x.view(B, 64, 64, C)
-        x=x.permute(0, 3, 1, 2)
-        x=self.neck(x)
+        x = x.permute(0, 3, 1, 2)
         return x
 
     def forward(self, x):
         x = self.forward_features(x)
+        x = self.neck(x)
         #x = self.norm_head(x)
         #x = self.head(x)
         return x

@@ -40,11 +40,11 @@ def two_way_attention_block(
     query, key, query_position, key_position, num_heads=4, downsample_rate=2, skip_first_layer_pe=False, mlp_ratio=8, activation="relu", name=""
 ):
     if skip_first_layer_pe:
-        query = attention(query, downsample_rate=downsample_rate, name=name + "query_")
+        query = attention(query, name=name + "query_")
     else:
         attn_out = attention(query + query_position, value=query, name=name + "query_")
         query = query + attn_out
-    query = layer_norm(query, name=name + "query_")
+    query = layer_norm(query, axis=-1, name=name + "query_")
 
     # Cross attention block, tokens attending to image embedding
     query_with_pe = query + query_position
@@ -52,25 +52,30 @@ def two_way_attention_block(
     head_dim = query.shape[-1] // num_heads // downsample_rate
     attn_out = attention(query_with_pe, key=key_with_pe, value=key, num_heads=num_heads, head_dim=head_dim, name=name + "cross_embedding_")
     query = query + attn_out
-    query = layer_norm(query, name=name + "cross_embedding_")
+    query = layer_norm(query, axis=-1, name=name + "cross_embedding_")
 
     # MLP block
     mlp_out = mlp_block(query, hidden_dim=int(query.shape[-1] * mlp_ratio), activation=activation, name=name + "mlp_")
     query = query + mlp_out
-    query = layer_norm(query, name=name + "mlp_")
+    query = layer_norm(query, axis=-1, name=name + "mlp_")
 
     # Cross attention block, image embedding attending to tokens
     query_with_pe = query + query_position
     attn_out = attention(key_with_pe, key=query_with_pe, value=query, head_dim=head_dim, name=name + "cross_tokens_")
     key = key + attn_out
-    key = layer_norm(key, name=name + "cross_tokens_")
+    key = layer_norm(key, axis=-1, name=name + "cross_tokens_")
     return query, key
 
 
 def two_way_transformer(
     image_embedding, image_position, point_embedding, depth=2, num_heads=8, mlp_dim=2048, downsample_rate=2, mlp_ratio=8, activation="relu", name=""
 ):
-    query, key, query_position, key_position = point_embedding, image_embedding, point_embedding, image_position
+    query, query_position, key, key_position = point_embedding, point_embedding, image_embedding, image_position
+
+    key = key if backend.image_data_format() == "channels_last" else layers.Permute([2, 3, 1])(key)
+    pre_shape = functional.shape(key) if None in key.shape[1:] or -1 in key.shape[1:] else [-1, *key.shape[1:]]  # Could be dynamic shape, reshape back later
+    key = layers.Reshape([-1, key.shape[-1]])(key)
+
     for ii in range(depth):
         skip_first_layer_pe = True if ii == 0 else False
         query, key = two_way_attention_block(
@@ -82,16 +87,29 @@ def two_way_transformer(
     head_dim = query.shape[-1] // num_heads // downsample_rate
     attn_out = attention(query_with_pe, key=key_with_pe, value=key, num_heads=num_heads, head_dim=head_dim, name=name + "token_to_image_")
     query = query + attn_out
-    query = layer_norm(query, name=name + "token_to_image_")
+    query = layer_norm(query, axis=-1, name=name + "token_to_image_")
+
+    key = functional.reshape(key, pre_shape)
+    key = key if backend.image_data_format() == "channels_last" else layers.Permute([3, 1, 2])(key)
     return query, key
 
 
-def MaskDecoder(embed_dims=256, num_mask_tokens=4, name="mask_decoder"):
+def mlp_block_3(inputs, hidden_dim, output_channel=-1, use_bias=True, activation="relu", name=None):
+    output_channel = output_channel if output_channel > 0 else inputs.shape[-1]
+    nn = layers.Dense(hidden_dim, use_bias=use_bias, name=name and name + "dense_1")(inputs)
+    nn = activation_by_name(nn, activation, name=name + "1_")
+    nn = layers.Dense(hidden_dim, use_bias=use_bias, name=name and name + "dense_2")(nn)
+    nn = activation_by_name(nn, activation, name=name + "2_")
+    nn = layers.Dense(output_channel, use_bias=use_bias, name=name and name + "dense_3")(nn)
+    return nn
+
+
+def MaskDecoder(embed_dims=256, num_mask_tokens=4, activation="relu", name="mask_decoder"):
     image_embedding = layers.Input([None, None, embed_dims], batch_size=1)
     point_embedding = layers.Input([None, embed_dims], batch_size=1)
     image_position = layers.Input([None, None, embed_dims], batch_size=1)
 
-    point_embedding_with_tokens = ClassToken(num_tokens=5, name="cls_token")(point_embedding)
+    point_embedding_with_tokens = ClassToken(num_tokens=num_mask_tokens + 1, name="cls_token")(point_embedding)
     iou_masks, encoded_image_embedding = two_way_transformer(image_embedding, image_position, point_embedding_with_tokens, name="attn_")
 
     # output_upscaling
@@ -104,10 +122,11 @@ def MaskDecoder(embed_dims=256, num_mask_tokens=4, name="mask_decoder"):
     iou_token_out, masks_top, masks_left, masks_bottom, masks_right = functional.unstack(iou_masks, axis=1)
     hyper_in = []
     for id, (ii, name) in enumerate(zip([masks_top, masks_left, masks_bottom, masks_right], ["top", "left", "bottom", "right"])):
-        hyper_in.append(mlp_block(embed_dims, hidden_dim=embed_dims, output_channel=embed_dims, activation=activation, name="masks_" + name))
-    iou_pred = mlp_block(iou_token_out)
-    hyper_in = [ for ]
+        hyper_in.append(mlp_block_3(ii, hidden_dim=embed_dims, output_channel=embed_dims // 8, activation=activation, name="masks_" + name + "_"))
     hyper_in = functional.stack(hyper_in, axis=1)
-    masks = hyper_in @ upscaled_image_embedding
 
-    return models.Model([image_with_masks_inputs, sparse_prompt_embedding, image_position_embedding], [masks, iou_pred], name=name)
+    print(f"{hyper_in.shape = }, {upscaled_image_embedding.shape = }")
+    masks = hyper_in @ upscaled_image_embedding
+    iou_pred = mlp_block_3(iou_token_out, hidden_dim=embed_dims, output_channel=num_mask_tokens, activation=activation, name="iou_pred_")
+
+    return models.Model([image_embedding, point_embedding, image_position], [masks, iou_pred], name=name)
