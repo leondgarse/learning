@@ -111,6 +111,7 @@ class PatchMerging(nn.Module):
         stride_c=2
         if(out_dim==320 or out_dim==448 or out_dim==576):
             stride_c=1
+        print(f"{stride_c = }")
         self.conv2 = Conv2d_BN(out_dim, out_dim, 3, stride_c, 1, groups=out_dim)
         self.conv3 = Conv2d_BN(out_dim, out_dim, 1, 1, 0)
 
@@ -123,7 +124,6 @@ class PatchMerging(nn.Module):
 
         x = self.conv1(x)
         x = self.act(x)
-
         x = self.conv2(x)
         x = self.act(x)
         x = self.conv3(x)
@@ -237,9 +237,7 @@ class Attention(torch.nn.Module):
         if mode and hasattr(self, 'ab'):
             del self.ab
         else:
-            self.register_buffer('ab',
-                                 self.attention_biases[:, self.attention_bias_idxs],
-                                 persistent=False)
+            self.ab = self.attention_biases[:, self.attention_bias_idxs]
 
     def forward(self, x):  # x (B,N,C)
         B, N, _ = x.shape
@@ -336,7 +334,8 @@ class TinyViTBlock(nn.Module):
             nW = pW // self.window_size
             # window partition
             x = x.view(B, nH, self.window_size, nW, self.window_size, C).transpose(2, 3).reshape(
-                B * nH * nW, self.window_size * self.window_size, C)
+                B * nH * nW, self.window_size * self.window_size, C
+            )
             x = self.attn(x)
             # window reverse
             x = x.view(B, nH, nW, self.window_size, self.window_size,
@@ -488,8 +487,7 @@ class TinyViT(nn.Module):
                           downsample=PatchMerging if (
                               i_layer < self.num_layers - 1) else None,
                           use_checkpoint=use_checkpoint,
-                          out_dim=embed_dims[min(
-                              i_layer + 1, len(embed_dims) - 1)],
+                          out_dim=embed_dims[min(i_layer + 1, len(embed_dims) - 1)],
                           activation=activation,
                           )
             if i_layer == 0:
@@ -537,7 +535,6 @@ class TinyViT(nn.Module):
         # layers -> blocks (depth)
         depth = sum(self.depths)
         lr_scales = [decay_rate ** (depth - i - 1) for i in range(depth)]
-        #print("LR SCALES:", lr_scales)
 
         def _set_lr_scale(m, scale):
             for p in m.parameters():
@@ -579,16 +576,13 @@ class TinyViT(nn.Module):
         for i in range(start_i, len(self.layers)):
             layer = self.layers[i]
             x = layer(x)
-        B,_,C=x.size()
-        x = x.view(B, 64, 64, C)
-        x = x.permute(0, 3, 1, 2)
         return x
 
     def forward(self, x):
         x = self.forward_features(x)
-        x = self.neck(x)
-        #x = self.norm_head(x)
-        #x = self.head(x)
+        B, _, C = x.size()
+        x = self.neck(x.view(B, 64, 64, C).permute(0, 3, 1, 2))
+        # x = self.head(self.norm_head(x.mean(1)))
         return x
 
 

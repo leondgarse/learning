@@ -104,9 +104,9 @@ def predict(features, original_size, input_size, image_encoder_size=1024, multim
     low_res_masks, iou_predictions = mask_decoder(
         image_embeddings=features,  # [1, 256, 64, 64]
         image_pe=prompt_encoder.get_dense_pe(),  # [1, 256, 64, 64]
-        sparse_prompt_embeddings=sparse_embeddings,
-        dense_prompt_embeddings=dense_embeddings,
-        multimask_output=multimask_output,
+        sparse_prompt_embeddings=sparse_embeddings,  # [1, 2, 256]
+        dense_prompt_embeddings=dense_embeddings,  # [1, 256, 64, 64]
+        # multimask_output=multimask_output,
     )
 
     # Upscale the masks to the original image resolution

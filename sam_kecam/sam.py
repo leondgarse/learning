@@ -48,6 +48,18 @@ def ImageEncoder(input_shape=(1024, 1024, 3), embed_dim=256):
     nn = layers.LayerNormalization(name="neck_2_ln")(nn)
     return models.Model(inputs, nn, name="image_encoder")
 
+
+def PromptEncoder(FakeModelWrapper):
+    def __init__(self, embed_dim=256, mask_in_chans=16, name="prompt_encoder"):
+        self.embed_dims = embed_dims
+        self.points_encoder = PointsEncoder(embed_dims=embed_dims)
+        self.bboxes_encoder = BboxesEncoder(embed_dims=embed_dims)
+        self.mask_encoder = MaskEncoder(embed_dims=embed_dims, mask_in_chans=mask_in_chans)
+        self.empty_masks_model = EmptyMask(embed_dims=embed_dims)
+        self.positional_embedding = PositionEmbeddingRandom(embed_dims=embed_dims)
+        self.models = [self.points_encoder, self.bboxes_encoder, self.mask_downscaler, self.empty_masks_model, self.positional_embedding]
+        super().__init__(self.models, name=name)
+
 class SAM(FakeModelWrapper):  # FakeModelWrapper providing save / load / cuda class methods
     def __init__(self, embed_dim=256, image_input_shape=(1024, 1024), mask_in_chans=16, name="sam"):
         self.image_input_shape = image_input_shape[:2] if isinstance(image_input_shape, (list, tuple)) else image_input_shape
@@ -107,6 +119,7 @@ class SAM(FakeModelWrapper):  # FakeModelWrapper providing save / load / cuda cl
         scaled_height, scaled_width = int(orign_height * scale + 0.5), int(orign_width * scale + 0.5)
         height_scale, width_scale = scaled_height / image_height, scaled_width / image_width
 
+        """ prompt_encoder """
         image_embeddings = self.image_encoder(self.preprocess_image(image, scaled_height, scaled_width))
         boxes_inputs = self.bboxes_encoder(self.preprocess_boxes(boxes, height_scale, width_scale)) if boxes is not None else self.empty_bboxes
         if points is not None and labels is not None:
@@ -118,9 +131,10 @@ class SAM(FakeModelWrapper):  # FakeModelWrapper providing save / load / cuda cl
         else:
             points_inputs = self.empty_points
         sparse_embeddings = functional.concat([points_inputs, boxes_inputs])
+        dense_embeddings = self.mask_downscaler(masks) if masks is not None else self.empty_masks
 
-        masks_inputs = self.mask_downscaler(masks) if masks is not None else self.empty_masks
-        image_with_masks_inputs = image_embeddings + masks_inputs
+        """ mask_decoder """
+        image_with_masks_inputs = image_embeddings + dense_embeddings
         low_res_masks, iou_predictions = mask_decoder([image_with_masks_inputs, sparse_embeddings, self.grid_positional_embedding])
         low_res_masks = low_res_masks.cpu().numpy() if hasattr(low_res_masks, "cpu") else low_res_masks.numpy()
         iou_predictions = iou_predictions.cpu().numpy() if hasattr(iou_predictions, "cpu") else iou_predictions.numpy()
