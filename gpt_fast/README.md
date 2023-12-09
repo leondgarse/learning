@@ -1,11 +1,35 @@
+- [Github pytorch-labs/gpt-fast](https://github.com/pytorch-labs/gpt-fast)
 - Install torch nightly from [Start Locally Torch](https://pytorch.org/get-started/locally/)
   ```sh
   pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
   pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu
   ```
 - **Run parallel**
+  ```py
+  import os
+  import torch
+  from typing import List, Optional
+
+  def maybe_init_dist() -> Optional[int]:
+      try:
+          rank = int(os.environ.get("LOCAL_RANK", "0"))  # provided by torchrun
+          world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))  # provided by torchrun
+          print(f"{rank = }, {world_size = }")
+
+          if world_size < 2:
+              return None  # too few gpus to parallelize, tp is no-op
+      except KeyError:
+          return None  # not run via torchrun, no-op
+
+      backend = "nccl" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "gloo"
+      torch.distributed.init_process_group(backend=backend, rank=rank, world_size=world_size)
+      return rank
+
+  if __name__ == "__main__":
+      print(f"{maybe_init_dist() = }")
+  ```
   ```sh
-  torchrun --standalone --nproc_per_node=2 generate.py --compile --checkpoint_path checkpoints/$MODEL_REPO/model.pth
+  torchrun --standalone --nproc_per_node=2 torch_parallel.py
   ```
 - **int8 / int4 quant -> tensor parallel -> compile**
 - **Model**
@@ -17,6 +41,7 @@
 
   GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "cpu"
   GLOBAL_PRECISSION = torch.bfloat16 if GLOBAL_DEVICE == "cuda" else torch.float32
+  GLOBAL_DIST_BACKEND = "nccl" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "gloo"
   ```
 - **compile**
   ```py
@@ -276,124 +301,74 @@
 - **tensor parallel**
   ```py
   import os
-  from typing import List, Optional
-
-  def maybe_init_dist() -> Optional[int]:
-      import torch.distributed as dist
-
-      try:
-          # provided by torchrun
-          rank = int(os.environ.get("LOCAL_RANK", "0"))
-          world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
-
-          if world_size < 2:
-              # too few gpus to parallelize, tp is no-op
-              return None
-      except KeyError:
-          # not run via torchrun, no-op
-          return None
-
-      dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-      return rank
-
   import torch
   from torch import nn
-  from torch.distributed import _functional_collectives as funcol
-
-  GLOBAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
-  GLOBAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
-
-  def _apply_tp_linear(linear: nn.Linear, style: str, weight_splits: List[int] = []) -> None:
-      # Linear's weight matrix is transposed, and is of shape (linear.out_features, linear.in_features)
-      dim_lookup = {"colwise": (0, "out_features"), "rowwise": (1, "in_features")}
-      assert style in dim_lookup
-      shard_dim, size_attr = dim_lookup[style]
-
-      # ensure we can shard evenly
-      assert getattr(linear, size_attr) % GLOBAL_WORLD_SIZE == 0
-      def shard(x, dim):
-          assert x.size(dim=dim) % GLOBAL_WORLD_SIZE == 0
-          return torch.tensor_split(x, GLOBAL_WORLD_SIZE, dim=dim)[GLOBAL_RANK]
-
-      def shard_qkv(qkv, dim, weight_splits):
-          q, k, v = qkv.split(weight_splits, dim=dim)
-          q = shard(q, dim)
-          k = shard(k, dim)
-          v = shard(v, dim)
-          return torch.cat((q,k,v), dim=dim)
-
-      # shard
-      if weight_splits:
-          # attention
-          assert len(weight_splits) == 3
-
-          if isinstance(linear, WeightOnlyInt4Linear):
-              sharded_weight = shard_qkv(linear.weight, shard_dim, [i//8 for i in weight_splits])
-              linear.scales_and_zeros = shard_qkv(linear.scales_and_zeros, 1 - shard_dim, weight_splits)
-          else:
-              sharded_weight = shard_qkv(linear.weight, shard_dim, weight_splits)
-          if hasattr(linear, "scales") and style == "colwise":
-              linear.scales = shard_qkv(linear.scales, 0, weight_splits)
-      else:
-          sharded_weight = shard(linear.weight, shard_dim)
-          if isinstance(linear, WeightOnlyInt4Linear):
-              linear.scales_and_zeros = shard(linear.scales_and_zeros, 1 - shard_dim)
-              if style == "rowwise":
-                  assert linear.scales_and_zeros.shape[0] * 32 == sharded_weight.shape[1] * sharded_weight.shape[2] * sharded_weight.shape[3]
-                  assert linear.scales_and_zeros.shape[1] == sharded_weight.shape[0] * 8
-          if hasattr(linear, "scales") and style == "colwise":
-              linear.scales = shard(linear.scales, 0)
-
-      # local_break()
-      linear.weight = nn.Parameter(sharded_weight, requires_grad=False)
-      setattr(linear, size_attr, getattr(linear, size_attr) // GLOBAL_WORLD_SIZE)
-
-      # shape info should still be synced
-      # assert linear.weight.shape == (linear.out_features, linear.in_features)
+  from typing import List, Optional
+  from torch.distributed._functional_collectives import all_reduce
 
 
-  def _apply_tp_ffn(mlp) -> None:
-      assert hasattr(mlp, "w1")
-      assert hasattr(mlp, "w3")
-      assert hasattr(mlp, "w2")
-
-      _apply_tp_linear(mlp.w1, "colwise")
-      _apply_tp_linear(mlp.w3, "colwise")
-      _apply_tp_linear(mlp.w2, "rowwise")
-
-      mlp.register_forward_hook(lambda _module, _input, output: funcol.all_reduce(output, "sum", list(range(GLOBAL_WORLD_SIZE))))
+  os.environ["KECAM_BACKEND"] = "torch"
+  from keras_cv_attention_models import llama2
+  from keras_cv_attention_models.pytorch_backend import models, layers
 
 
-  def _apply_tp_attn(attn) -> None:
-      assert hasattr(attn, "wqkv")
-      assert hasattr(attn, "wo")
+  def maybe_init_dist() -> Optional[int]:
+      try:
+          rank = int(os.environ.get("LOCAL_RANK", "0"))  # provided by torchrun
+          world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))  # provided by torchrun
+          print(f"{rank = }, {world_size = }")
 
-      kv_size = attn.n_local_heads * attn.head_dim
-      _apply_tp_linear(attn.wqkv, "colwise", [attn.dim, kv_size, kv_size])
-      _apply_tp_linear(attn.wo, "rowwise")
+          if world_size < 2:
+              return None  # too few gpus to parallelize, tp is no-op
+      except KeyError:
+          return None  # not run via torchrun, no-op
 
-      # overwrite
-      attn.n_head = attn.n_head // GLOBAL_WORLD_SIZE
-      attn.dim = attn.dim // GLOBAL_WORLD_SIZE
-      attn.head_dim = attn.dim // attn.n_head
-      attn.n_local_heads = attn.n_local_heads // GLOBAL_WORLD_SIZE
-
-      attn.register_forward_hook(lambda _module, _input, output: funcol.all_reduce(output[0], "sum", list(range(GLOBAL_WORLD_SIZE))))
-
-
-  def _apply_tp_Transformer(Transformer) -> None:
-      # overwrite config before Transformer.setup_cache is called
-      Transformer.config.n_head = Transformer.config.n_head // GLOBAL_WORLD_SIZE
-      Transformer.config.dim = Transformer.config.dim // GLOBAL_WORLD_SIZE
-      Transformer.config.n_local_heads = Transformer.config.n_local_heads // GLOBAL_WORLD_SIZE
+      backend = "nccl" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "gloo"
+      torch.distributed.init_process_group(backend=backend, rank=rank, world_size=world_size)
+      return rank
 
 
-  def apply_tp(model) -> None:
-      _apply_tp_Transformer(model)
-      for block in model.layers:
-          # Apply to MLP
-          _apply_tp_ffn(block.feed_forward)
-          _apply_tp_attn(block.attention)
+  def apply_tensor_parallel(model):
+      for layer in model.layers:
+          if isinstance(layer, layers.Reshape):  # and ("query" in layer.name or "key" in layer.name or "value" in layer.name):
+              print("[reshape], layer.name:", layer.name, "layer.target_shape:", layer.target_shape)
+              layer.target_shape[1] //= LOCAL_WORLD_SIZE  # Split num_heads
+              continue
+          # if isinstance(layer, layers.Dropout) and LOCAL_WORLD_SIZE >= 2:
+          #     layer.module.register_forward_hook(lambda _module, _input, output: all_reduce(output, "sum", list(range(LOCAL_WORLD_SIZE))))
+
+          if not isinstance(layer, layers.Dense) or layer.name in ["lm_head"]:
+              continue
+
+          if layer.name.endswith("mlp.down_proj") or layer.name.endswith("o_proj"):  # row shard, shard on inputs
+              print("[row shard] layer.name:", layer.name, "LOCAL_RANK:", LOCAL_RANK)
+              shard_weights = torch.tensor_split(layer.module.weight, LOCAL_WORLD_SIZE, dim=1)[LOCAL_RANK]
+              layer.module.weight = torch.nn.Parameter(shard_weights, requires_grad=False)
+              layer.module.in_features //= LOCAL_WORLD_SIZE
+
+              if LOCAL_WORLD_SIZE >= 2:
+                  layer.module.register_forward_hook(lambda _module, _input, output: all_reduce(output, "sum", list(range(LOCAL_WORLD_SIZE))))
+          else:  # col shard, shard on outputs
+              print("[col shard] layer.name:", layer.name, "LOCAL_RANK:", LOCAL_RANK)
+              shard_weights = torch.tensor_split(layer.module.weight, LOCAL_WORLD_SIZE, dim=0)[LOCAL_RANK]
+              layer.module.weight = torch.nn.Parameter(shard_weights, requires_grad=False)
+              layer.module.out_features //= LOCAL_WORLD_SIZE
+              # if LOCAL_WORLD_SIZE >= 2:
+              #     layer.module.register_forward_hook(lambda _module, _input, output: all_reduce(output, "sum", list(range(LOCAL_WORLD_SIZE))))
+
+
+  if __name__ == "__main__":
+      maybe_init_dist()
+
+      LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
+      LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+
+      model = llama2.LLaMA2_42M()
+      apply_tensor_parallel(model)
+      # print(model)
+      # model.set_debug(True)
+      # model.run_prediction('As evening fell, a maiden stood at the edge of a wood. In her hands,')
+      model.run_prediction("hello")
   ```
 - **Speculative**
   ```py
