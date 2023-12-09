@@ -22,6 +22,7 @@ ss = torch.load("mobile_sam.pt")
 image_encoder.load_state_dict({kk[len('image_encoder.'):]: vv for kk, vv in ss.items() if kk.startswith('image_encoder.')})
 prompt_encoder.load_state_dict({kk[len('prompt_encoder.'):]: vv for kk, vv in ss.items() if kk.startswith('prompt_encoder.')})
 mask_decoder.load_state_dict({kk[len('mask_decoder.'):]: vv for kk, vv in ss.items() if kk.startswith('mask_decoder.')})
+image_encoder, prompt_encoder, mask_decoder = image_encoder.eval(), prompt_encoder.eval(), mask_decoder.eval()
 
 def preprocess(inputs, image_encoder_size=1024) -> torch.Tensor:
     """Normalize pixel values and pad to a square input."""
@@ -129,8 +130,11 @@ features, original_size, input_size = set_image(image)
 masks, iou_predictions, low_res_masks = predict(features, original_size, input_size)
 print(features.shape, original_size, input_size, masks.shape, iou_predictions.shape, low_res_masks.shape)
 # torch.Size([1, 256, 64, 64]) (1367, 2048) (684, 1024) (3, 1367, 2048) (3,) (3, 256, 256)
-```
-```py
+
+
+""" Show """
+
+
 def show_mask(mask, ax, random_color=False):
     color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0) if random_color else np.array([30/255, 144/255, 255/255, 0.6])
     mask_image = np.expand_dims(mask, -1) * color.reshape(1, 1, -1)
@@ -146,13 +150,13 @@ def show_box(box, ax):
     w, h = box[2] - box[0], box[3] - box[1]
     ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))    
 
-for id, (mask, iou_prediction) in enumerate(zip(masks, iou_predictions)):
-    fig = plt.figure(figsize=(10,10))
-    plt.imshow(image)
-    show_mask(mask, plt.gca())
-    show_points(point_coords, point_labels, plt.gca())
-    plt.title(f"Mask {id+1}, Score: {iou_prediction:.3f}", fontsize=18)
-    plt.axis('off')
-    plt.show()
+total = masks.shape[0]
+fig, axes = plt.subplots(1, total, figsize=(10 * total, 10))
+for id, (ax, mask, iou_prediction) in enumerate(zip(axes, masks, iou_predictions)):
+    ax.imshow(image)
+    show_mask(mask, ax)
+    show_points(point_coords, point_labels, ax)
+    ax.set_title(f"Mask {id+1}, Score: {iou_prediction:.3f}", fontsize=18)
+    ax.set_axis_off()
 fig.savefig('aa.jpg')
 ```
