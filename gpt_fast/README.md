@@ -1,4 +1,5 @@
 - [Github pytorch-labs/gpt-fast](https://github.com/pytorch-labs/gpt-fast)
+- [Colab gpt_fast_test.ipynb](https://colab.research.google.com/drive/1C3w-jI3BinXuqDqaS3e2lvU8TUkOf0nH?usp=sharing)
 - Install torch nightly from [Start Locally Torch](https://pytorch.org/get-started/locally/)
   ```sh
   pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
@@ -302,11 +303,23 @@
 - **tensor parallel**
   ```py
   import os
+  import time
   import torch
   from torch import nn
   from typing import List, Optional
   from torch.distributed._functional_collectives import all_reduce
 
+  import torch._dynamo.config
+  import torch._inductor.config
+
+  torch._inductor.config.coordinate_descent_tuning = True
+  torch._inductor.config.triton.unique_kernel_names = True
+  torch._inductor.config.fx_graph_cache = True # Experimental feature to reduce compilation times, will be on by default in future
+
+  GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "cpu"
+  GLOBAL_PRECISSION = torch.float16 if GLOBAL_DEVICE == "cuda" else torch.float32
+  GLOBAL_DIST_BACKEND = "nccl" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "gloo"
+  GLOBAL_CONTEXT = torch.autocast(device_type=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION)
 
   os.environ["KECAM_BACKEND"] = "torch"
   from keras_cv_attention_models import llama2
@@ -360,188 +373,72 @@
       LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
       LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
 
-      model = llama2.LLaMA2_42M()
+      with torch.device(GLOBAL_DEVICE), GLOBAL_CONTEXT:
+          model = llama2.LLaMA2_1B()
+      with torch.no_grad(), torch.device(GLOBAL_DEVICE):
+          inputs = torch.randint(low=0, high=32000, size=[1, 1])
+          print(model(inputs).shape)
+
+          repeat = 10
+          start = time.time()
+          _ = [model(inputs) for ii in range(repeat)]
+          end = time.time()
+          print("[Before tensor parallel] {} ms per loop, loop: {}".format((end - start) * 1000, repeat))
+
       apply_tensor_parallel(model)
+
       # print(model)
       # model.set_debug(True)
-      model.run_prediction('As evening fell, a maiden stood at the edge of a wood. In her hands,', top_k=1)
+      # model.run_prediction('As evening fell, a maiden stood at the edge of a wood. In her hands,', top_k=1)
+      with torch.no_grad(), torch.device(GLOBAL_DEVICE):
+          inputs = torch.randint(low=0, high=32000, size=[1, 1])
+          print(model(inputs).shape)
+
+          repeat = 10
+          start = time.time()
+          _ = [model(inputs) for ii in range(repeat)]
+          end = time.time()
+          print("[After tensor parallel] {} ms per loop, loop: {}".format((end - start) * 1000, repeat))
   ```
 - **Speculative**
-```py
-os.environ['KECAM_BACKEND'] = 'torch'
-import torch
-from keras_cv_attention_models import llama2
-draft = llama2.LLaMA2_42M()
-target = llama2.LLaMA2_110M()
-draft.run_prediction.build()
-
-inputs = "As evening fell, a maiden stood at the edge of a wood. In her hands,"
-speculate_k = 8
-temperature = 0.8
-start_ids = np.array(draft.run_prediction.tokenizer.encode(inputs, add_sot=True))
-draft_tokens, draft_probs = draft.run_prediction(inputs, max_new_tokens=speculate_k, top_k=1, temperature=temperature, return_token_and_probs=True)
-
-with torch.no_grad():
-    target_logits = target(np.concatenate([start_ids, draft_tokens])[None])[0].cpu().numpy()
-target_probs = target.run_prediction.softmax_numpy(target_logits / max(temperature, 1e-5), axis=-1)
-
-# target_sub_prob >= draft_sub_prob: always accept draft token
-# target_sub_prob < draft_sub_prob: draft_sub_prob/target_sub_prob prob to accept draft token
-draft_sub_prob = draft_probs[np.arange(0, speculate_k), draft_tokens]
-target_sub_prob = target_probs[np.arange(0, speculate_k), draft_tokens]
-accept_draft_prob = np.minimum(target_sub_prob / draft_sub_prob, 1)
-rejected_locations = np.nonzero(np.random.uniform(size=accept_draft_prob.shape) > accept_draft_prob)[0]
-
-
-if rejected_locations.shape[0] == 0: # All draft tokens have been accepted
-    accept_length = speculate_k + 1
-    last_token = multinomial_sample_one_no_sync(target_probs[-1])
-    # fill last token into draft model
-    draft_model(draft_tokens[-1].view(1, -1), orig_input_pos + speculate_k)
-    return torch.cat([draft_tokens, last_token])
-else:
-    accept_length = rejected_locations[0].item()
-    p = draft_probs[accept_length]
-    q = target_probs[accept_length]
-    new = q - p
-    new = torch.where(new > 0, new, 0.0)
-    new = new / new.sum()
-    next_token = multinomial_sample_one_no_sync(new)
-    return torch.cat([draft_tokens[:accept_length], next_token])
-```
   ```py
+  os.environ['KECAM_BACKEND'] = 'torch'
   import torch
+  from keras_cv_attention_models import llama2
+  draft = llama2.LLaMA2_1B()
+  target = llama2.LLaMA2_7B(pretrained="llama2_chat/llama2_7b_chat_hf.h5")
+  # draft = llama2.LLaMA2_42M()
+  # target = llama2.LLaMA2_110M()
+  draft.run_prediction.build()
+  min_vocab_size = min(draft.output_shape[-1], target.output_shape[-1])
 
-  def multinomial_sample_one_no_sync(probs_sort): # Does multinomial sampling without a cuda synchronization
-      q = torch.empty_like(probs_sort).exponential_(1)
-      return torch.argmax(probs_sort / q, dim=-1, keepdim=True).to(dtype=torch.int)
+  speculate_k = 8
+  temperature = 0.8
+  inputs = "As evening fell, a maiden stood at the edge of a wood. In her hands,"
+  start_ids = np.array(draft.run_prediction.tokenizer.encode(inputs, add_sot=True))
+  draft_tokens, draft_probs = draft.run_prediction(inputs, max_new_tokens=speculate_k, top_k=1, temperature=temperature, return_token_and_probs=True)
 
-  def logits_to_probs(logits, temperature: float = 1.0, top_k: Optional[int] = None):
-      logits = logits / max(temperature, 1e-5)
+  with torch.no_grad():
+      target_logits = target(np.concatenate([start_ids, draft_tokens])[None])[0].cpu().numpy()
+  target_probs = target.run_prediction.softmax_numpy(target_logits / max(temperature, 1e-5), axis=-1)
 
-      if top_k is not None:
-          v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-          pivot = v.select(-1, -1).unsqueeze(-1)
-          logits = torch.where(logits < pivot, -float("Inf"), logits)
-      probs = torch.nn.functional.softmax(logits, dim=-1)
-      return probs
+  # target_sub_prob >= draft_sub_prob: always accept draft token
+  # target_sub_prob < draft_sub_prob: draft_sub_prob/target_sub_prob prob to accept draft token
+  target_start_pos = target_probs.shape[0] - speculate_k - 1
+  draft_sub_prob = draft_probs[np.arange(0, speculate_k), draft_tokens]
+  target_sub_prob = target_probs[np.arange(target_start_pos, target_start_pos + speculate_k), draft_tokens]
+  accept_draft_prob = np.minimum(target_sub_prob / draft_sub_prob, 1)
+  rejected_locations = np.nonzero(np.random.uniform(size=accept_draft_prob.shape) > accept_draft_prob)[0]
 
-  def sample(logits, temperature: float = 1.0, top_k: Optional[int] = None):
-      probs = logits_to_probs(logits[0, -1], temperature, top_k)
-      idx_next = multinomial_sample_one_no_sync(probs)
-      return idx_next, probs
 
-  def prefill(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor, **sampling_kwargs) -> torch.Tensor:
-      # input_pos: [B, S]
-      logits = model(x, input_pos)
-      return sample(logits, **sampling_kwargs)[0]
-
-  def decode_one_token(model: Transformer, x: torch.Tensor, input_pos: torch.Tensor, **sampling_kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-      # input_pos: [B, 1]
-      assert input_pos.shape[-1] == 1
-      logits = model(x, input_pos)
-      return sample(logits, **sampling_kwargs)
-
-  def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torch.Tensor, num_new_tokens: int, callback=lambda _: _, **sampling_kwargs):
-      new_tokens, new_probs = [], []
-      for i in range(num_new_tokens):
-          with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True): # Actually better for Inductor to codegen attention here
-              next_token, next_prob = decode_one_token(model, cur_token, input_pos, **sampling_kwargs)
-          input_pos += 1
-          new_tokens.append(next_token.clone())
-          callback(new_tokens[-1])
-          new_probs.append(next_prob.clone())
-          cur_token = next_token.view(1, -1)
-      return new_tokens, new_probs
-
-  def speculative_decode(model, draft_model, cur_token, input_pos, speculate_k, **sampling_kwargs):
-      # draft model inference sequentially
-      device = cur_token.device
-      orig_input_pos = torch.tensor([input_pos], dtype=torch.int64, device=cur_token.device)
-      draft_tokens, draft_probs = decode_n_tokens(draft_model, cur_token.view(1, -1), orig_input_pos.clone(), speculate_k, **sampling_kwargs)
-
-      draft_tokens = torch.cat(draft_tokens)
-      # parallel inference on target model using draft tokens
-      input_pos = torch.arange(input_pos, input_pos + speculate_k + 1, device=cur_token.device)
-      target_logits = model(torch.cat([cur_token.view(1), draft_tokens]).view(1, -1), input_pos)
-      target_probs = logits_to_probs(target_logits[0], **sampling_kwargs)
-      draft_probs = torch.stack(draft_probs)
-      # q: target prob, p: draft prob
-      # q >= p: always accept draft token
-      # q < p: q/p prob to accept draft token
-      p = draft_probs[torch.arange(0, speculate_k, device=device), draft_tokens]
-      q = target_probs[torch.arange(0, speculate_k, device=device), draft_tokens]
-      accept_draft_prob = torch.minimum(torch.ones(()), q[:speculate_k]/ p)
-      rejected_locations = (torch.rand_like(accept_draft_prob) > accept_draft_prob).nonzero()
-
-      if rejected_locations.shape[0] == 0: # All draft tokens have been accepted
-          accept_length = speculate_k + 1
-          last_token = multinomial_sample_one_no_sync(target_probs[-1])
-          # fill last token into draft model
-          draft_model(draft_tokens[-1].view(1, -1), orig_input_pos + speculate_k)
-          return torch.cat([draft_tokens, last_token])
-      else:
-          accept_length = rejected_locations[0].item()
-          p = draft_probs[accept_length]
-          q = target_probs[accept_length]
-          new = q - p
-          new = torch.where(new > 0, new, 0.0)
-          new = new / new.sum()
-          next_token = multinomial_sample_one_no_sync(new)
-          return torch.cat([draft_tokens[:accept_length], next_token])
-
-  @torch.no_grad()
-  def generate(model, prompt, max_new_tokens, *, interactive, draft_model, speculate_k=8, callback=lambda x: x, **sampling_kwargs):
-      """
-      Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
-      """
-
-      is_speculative = draft_model is not None
-      # create an empty tensor of the expected final shape and fill in the current tokens
-      T = prompt.size(0)
-      T_new = T + max_new_tokens
-      if interactive:
-          max_seq_length = 350
-      else:
-          max_seq_length = min(T_new, model.config.block_size)
-
-      device, dtype = prompt.device, prompt.dtype
-      max_seq_length = max_seq_length + speculate_k + 1 if is_speculative else max_seq_length
-      with torch.device(device):
-          model.setup_caches(max_batch_size=1, max_seq_length=max_seq_length)
-          if is_speculative and draft_model is not model:
-              draft_model.setup_caches(max_batch_size=1, max_seq_length=max_seq_length)
-
-      # create an empty tensor of the expected final shape and fill in the current tokens
-      empty = torch.empty(T_new, dtype=dtype, device=device)
-      empty[:T] = prompt
-      seq = empty
-      input_pos = torch.arange(0, T, device=device)
-
-      next_token = prefill(model, prompt.view(1, -1), input_pos, **sampling_kwargs)
-      if is_speculative:
-          prefill(draft_model, prompt.view(1, -1), input_pos, **sampling_kwargs)
-      seq[T] = next_token
-
-      input_pos = torch.tensor([T], device=device, dtype=torch.int)
-      accept_counts = [0] * (speculate_k + 1)
-
-      if is_speculative:
-          input_pos = input_pos.item()  # for speculative decoding easier to keep on host
-          while input_pos < T_new - 1:
-              cur_token = next_token.view(())
-
-              next_tokens = speculative_decode(model, draft_model, cur_token, input_pos, speculate_k, **sampling_kwargs)
-
-              accept_counts[len(next_tokens) - 1] += 1
-              num_added = min(T_new - input_pos - 1, len(next_tokens))
-              seq[input_pos + 1 : input_pos + num_added + 1] = next_tokens[: num_added]
-              for i in next_tokens[: num_added,]:
-                  callback(i)
-              input_pos = input_pos + num_added
-              next_token = next_tokens[-1]
-      else:
-          generated_tokens, _ = decode_n_tokens(model, next_token.view(1, -1), input_pos, max_new_tokens - 1, callback=callback, **sampling_kwargs)
-          seq[T + 1:] = torch.cat(generated_tokens)
-      return seq, {'accept_counts': accept_counts}
+  if rejected_locations.shape[0] == 0:  # All draft tokens have been accepted
+      accept_length = speculate_k + 1
+      last_token = target_probs[-1].argmax(-1)
+      accept_tokens = np.concatenate([draft_tokens, last_token[None]])
+  else:
+      accept_length = rejected_locations[0]  # The first rejected
+      draft_prob = draft_probs[accept_length, :min_vocab_size]
+      target_prob = target_probs[target_start_pos + accept_length, :min_vocab_size]
+      next_token = (target_prob - draft_prob).argmax()
+      accept_tokens = np.concatenate([draft_tokens[:accept_length], next_token[None]])
   ```
