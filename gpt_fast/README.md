@@ -4,6 +4,7 @@
   pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
   pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cpu
   ```
+- **int8 / int4 quant -> tensor parallel -> compile**
 - **Run parallel**
   ```py
   import os
@@ -31,7 +32,6 @@
   ```sh
   torchrun --standalone --nproc_per_node=2 torch_parallel.py
   ```
-- **int8 / int4 quant -> tensor parallel -> compile**
 - **Model**
   ```py
   os.environ['KECAM_BACKEND'] = 'torch'
@@ -58,6 +58,7 @@
 
 
   import torch
+
   def model_forward(model, x, input_pos):
       return model(x, input_pos)
 
@@ -334,8 +335,6 @@
               print("[reshape], layer.name:", layer.name, "layer.target_shape:", layer.target_shape)
               layer.target_shape[1] //= LOCAL_WORLD_SIZE  # Split num_heads
               continue
-          # if isinstance(layer, layers.Dropout) and LOCAL_WORLD_SIZE >= 2:
-          #     layer.module.register_forward_hook(lambda _module, _input, output: all_reduce(output, "sum", list(range(LOCAL_WORLD_SIZE))))
 
           if not isinstance(layer, layers.Dense) or layer.name in ["lm_head"]:
               continue
@@ -353,8 +352,6 @@
               shard_weights = torch.tensor_split(layer.module.weight, LOCAL_WORLD_SIZE, dim=0)[LOCAL_RANK]
               layer.module.weight = torch.nn.Parameter(shard_weights, requires_grad=False)
               layer.module.out_features //= LOCAL_WORLD_SIZE
-              # if LOCAL_WORLD_SIZE >= 2:
-              #     layer.module.register_forward_hook(lambda _module, _input, output: all_reduce(output, "sum", list(range(LOCAL_WORLD_SIZE))))
 
 
   if __name__ == "__main__":
@@ -367,10 +364,51 @@
       apply_tensor_parallel(model)
       # print(model)
       # model.set_debug(True)
-      # model.run_prediction('As evening fell, a maiden stood at the edge of a wood. In her hands,')
-      model.run_prediction("hello")
+      model.run_prediction('As evening fell, a maiden stood at the edge of a wood. In her hands,', top_k=1)
   ```
 - **Speculative**
+```py
+os.environ['KECAM_BACKEND'] = 'torch'
+import torch
+from keras_cv_attention_models import llama2
+draft = llama2.LLaMA2_42M()
+target = llama2.LLaMA2_110M()
+draft.run_prediction.build()
+
+inputs = "As evening fell, a maiden stood at the edge of a wood. In her hands,"
+speculate_k = 8
+temperature = 0.8
+start_ids = np.array(draft.run_prediction.tokenizer.encode(inputs, add_sot=True))
+draft_tokens, draft_probs = draft.run_prediction(inputs, max_new_tokens=speculate_k, top_k=1, temperature=temperature, return_token_and_probs=True)
+
+with torch.no_grad():
+    target_logits = target(np.concatenate([start_ids, draft_tokens])[None])[0].cpu().numpy()
+target_probs = target.run_prediction.softmax_numpy(target_logits / max(temperature, 1e-5), axis=-1)
+
+# target_sub_prob >= draft_sub_prob: always accept draft token
+# target_sub_prob < draft_sub_prob: draft_sub_prob/target_sub_prob prob to accept draft token
+draft_sub_prob = draft_probs[np.arange(0, speculate_k), draft_tokens]
+target_sub_prob = target_probs[np.arange(0, speculate_k), draft_tokens]
+accept_draft_prob = np.minimum(target_sub_prob / draft_sub_prob, 1)
+rejected_locations = np.nonzero(np.random.uniform(size=accept_draft_prob.shape) > accept_draft_prob)[0]
+
+
+if rejected_locations.shape[0] == 0: # All draft tokens have been accepted
+    accept_length = speculate_k + 1
+    last_token = multinomial_sample_one_no_sync(target_probs[-1])
+    # fill last token into draft model
+    draft_model(draft_tokens[-1].view(1, -1), orig_input_pos + speculate_k)
+    return torch.cat([draft_tokens, last_token])
+else:
+    accept_length = rejected_locations[0].item()
+    p = draft_probs[accept_length]
+    q = target_probs[accept_length]
+    new = q - p
+    new = torch.where(new > 0, new, 0.0)
+    new = new / new.sum()
+    next_token = multinomial_sample_one_no_sync(new)
+    return torch.cat([draft_tokens[:accept_length], next_token])
+```
   ```py
   import torch
 
