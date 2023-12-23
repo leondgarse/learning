@@ -400,6 +400,9 @@
           end = time.time()
           print("[After tensor parallel] {} ms per loop, loop: {}".format((end - start) * 1000, repeat))
   ```
+  ```sh
+  torchrun --standalone --nproc_per_node=2 torch_parallel_shard.py
+  ```
 - **Speculative**
   ```py
   os.environ['KECAM_BACKEND'] = 'torch'
@@ -442,3 +445,17 @@
       next_token = (target_prob - draft_prob).argmax()
       accept_tokens = np.concatenate([draft_tokens[:accept_length], next_token[None]])
   ```
+***
+
+# Reloading weights
+```py
+os.environ['KECAM_BACKEND'] = 'torch'
+
+from keras_cv_attention_models import llama2
+mm = llama2.LLaMA2_1B()
+mm.save_weights(mm.name + ".pt")
+
+tt = LLaMA2_1B()
+ss = torch.load('llama2_1b.pt')
+tt.load_state_dict({ii: ss['state_dict'][('_'.join(ii.split('.')[:-1]) + '.' + ii.split('.')[-1])] for ii in tt.state_dict().keys()})
+```
