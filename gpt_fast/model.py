@@ -181,8 +181,12 @@ def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
 
 
 def LLaMA2_1B(vocab_size=32003, **kwargs):
-    return Transformer(n_layer=22, vocab_size=vocab_size, block_size=8192, rope_base=10000, dim=2048, n_head=32, n_local_heads=4, **kwargs)
+    model = Transformer(n_layer=22, vocab_size=vocab_size, block_size=8192, rope_base=10000, dim=2048, n_head=32, n_local_heads=4, **kwargs)
+    model.name = 'llama2_1b'
+    return model
 
 
 def LLaMA2_7B(vocab_size=32000, **kwargs):
-    return Transformer(n_layer=32, vocab_size=vocab_size, block_size=16384, rope_base=10000, dim=4096, n_head=32, n_local_heads=-1, **kwargs)
+    model = Transformer(n_layer=32, vocab_size=vocab_size, block_size=16384, rope_base=10000, dim=4096, n_head=32, n_local_heads=-1, **kwargs)
+    model.name = 'llama2_7b'
+    return model

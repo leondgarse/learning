@@ -38,6 +38,8 @@ class WeightOnlyInt8Linear(torch.nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        # Error if using torch.nn.Parameter: RuntimeError: Only Tensors of floating point and complex dtype can require gradients
+        # self.weight = torch.nn.Parameter(torch.empty((out_features, in_features), dtype=torch.int8, requires_grad=False))
         self.register_buffer("weight", torch.empty((out_features, in_features), dtype=torch.int8))
         self.register_buffer("scales", torch.ones(out_features, dtype=torch.bfloat16))
 

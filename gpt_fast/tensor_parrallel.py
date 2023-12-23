@@ -4,7 +4,10 @@ import torch
 import numpy as np
 import torch._dynamo.config
 import torch._inductor.config
-from torch.distributed._functional_collectives import all_reduce
+try:
+    from torch.distributed._functional_collectives import all_reduce
+except:
+    from torch.distributed import all_reduce
 # import matplotlib.pyplot as plt
 
 import model, int8_quant
@@ -118,7 +121,7 @@ if __name__ == "__main__":
         tt.load_state_dict({ii: ss['state_dict'][('_'.join(ii.split('.')[:-1]) + '.' + ii.split('.')[-1])] for ii in tt.state_dict().keys()})
     # tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
 
-    print(">>>> Quant") if LOCAL_RANK == 0 else None
+    print(">>>> Quant")
     if not os.path.exists(quant_save_path):
         quantized_state_dict = int8_quant.create_quantized_state_dict(tt)
         torch.save(quantized_state_dict, quant_save_path)
@@ -128,13 +131,13 @@ if __name__ == "__main__":
     tt.load_state_dict(quantized_state_dict, assign=True)
 
     if LOCAL_WORLD_SIZE >= 2:
-        print(">>>> Tensor Parallel") if LOCAL_RANK == 0 else None
-        print("     [Before] Total parameters:", sum([int(np.prod(ii.shape)) for ii in tt.parameters()])) if LOCAL_RANK == 0 else None
+        print(">>>> Tensor Parallel")
+        print("     [Before] Total parameters:", sum([int(np.prod(ii.shape)) for ii in tt.state_dict().values()]))
         # apply_tensor_parallel_kecam(tt)
         apply_tensor_parallel_torch(tt)
-        print("     [After] Total parameters:", sum([int(np.prod(ii.shape)) for ii in tt.parameters()])) if LOCAL_RANK == 0 else None
+        print("     [After] Total parameters:", sum([int(np.prod(ii.shape)) for ii in tt.state_dict().values()]))
 
-    print(">>>> To device and precission") if LOCAL_RANK == 0 else None
+    print(">>>> To device and precission")
     tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
 
     print(">>>> compile") if LOCAL_RANK == 0 else None
@@ -144,13 +147,13 @@ if __name__ == "__main__":
     repeat = 100
     with torch.no_grad(), torch.device(GLOBAL_DEVICE):
         tt.setup_caches(max_batch_size=1, max_seq_length=2048)
-        print(">>>> Warmup") if LOCAL_RANK == 0 else None
+        print(">>>> Warmup")
         for id in range(5):
             inputs = torch.randint(low=0, high=32000, size=[1, 1])
             input_pos = torch.ones([1], dtype=torch.int64) + id
-            print(decode_one_token(tt, inputs, input_pos).shape) if LOCAL_RANK == 0 else None
+            print(decode_one_token(tt, inputs, input_pos).shape)
 
-        print(">>>> Repeat test") if LOCAL_RANK == 0 else None
+        print(">>>> Repeat test")
         times = []
         for id in range(repeat):
             inputs = torch.randint(low=0, high=32000, size=[1, 1])
@@ -158,5 +161,5 @@ if __name__ == "__main__":
             ss = time.time()
             out = decode_one_token(tt, inputs, input_pos)
             times.append((time.time() - ss) * 1000)
-    print("Mean of time(ms) token for the inner 80%:", np.mean(sorted(times)[len(times) // 10: -len(times) // 10])) if LOCAL_RANK == 0 else None
+    print("Mean of time(ms) token for the inner 80%:", np.mean(sorted(times)[len(times) // 10: -len(times) // 10]))
     # plt.plot(times)
