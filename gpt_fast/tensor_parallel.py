@@ -172,7 +172,7 @@ if __name__ == "__main__":
 
     repeat = 100
     with torch.no_grad(), torch.device(LOCAL_DEVICE):
-        tt.setup_caches(max_batch_size=1, max_seq_length=2048)
+        tt.setup_caches(max_batch_size=1, max_seq_length=2048, dtype=GLOBAL_PRECISSION)
         print(">>>> Warmup")
         for id in range(5):
             inputs = torch.randint(low=0, high=32000, size=[1, 1])
