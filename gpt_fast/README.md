@@ -15,7 +15,7 @@
   os.environ['KECAM_BACKEND'] = 'torch'
 
   if not os.path.exists("llama2_1b.pt"):
-      from keras_cv_attention_models import llama2
+      from kecam import llama2
       mm = llama2.LLaMA2_1B()
       mm.half().save_weights("llama2_1b.pt")
   ```
@@ -35,7 +35,7 @@
   os.rename(os.path.realpath(aa), os.path.basename(aa))  # Move to current dir
   ```
   ```py
-  from keras_cv_attention_models import llama2
+  from kecam import llama2
   _ = llama2.convert_huggingface_weights_to_h5("pytorch_model-00001-of-00002.bin", to_fp16=True)
   # >>>> Save to: pytorch_model-00001-of-00002.h5
   _ = llama2.convert_huggingface_weights_to_h5("pytorch_model-00002-of-00002.bin", to_fp16=True)
@@ -45,38 +45,11 @@
   import os
   os.environ['KECAM_BACKEND'] = 'torch'
 
-  from keras_cv_attention_models import llama2
+  from kecam import llama2
   mm = llama2.LLaMA2_7B(pretrained=["pytorch_model-00001-of-00002.h5", "pytorch_model-00002-of-00002.h5"])
   # >>>> Load pretrained from: pytorch_model-00001-of-00002.h5
   # >>>> Load pretrained from: pytorch_model-00002-of-00002.h5
   mm.half().save(mm.name + ".pt")  # mm.half().save(mm.name + ".h5")
-  ```
-## Run parallel
-  ```py
-  import os
-  import torch
-  from typing import List, Optional
-
-  def maybe_init_dist() -> Optional[int]:
-      try:
-          rank = int(os.environ.get("LOCAL_RANK", "0"))  # provided by torchrun
-          world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))  # provided by torchrun
-          print(f"{rank = }, {world_size = }")
-
-          if world_size < 2:
-              return None  # too few gpus to parallelize, tp is no-op
-      except KeyError:
-          return None  # not run via torchrun, no-op
-
-      backend = "nccl" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "gloo"
-      torch.distributed.init_process_group(backend=backend, rank=rank, world_size=world_size)
-      return rank
-
-  if __name__ == "__main__":
-      print(f"{maybe_init_dist() = }")
-  ```
-  ```sh
-  torchrun --standalone --nproc_per_node=2 torch_parallel.py
   ```
 ## Env
   ```py
@@ -137,18 +110,25 @@
   ```py
   tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
   times = timeit_model_decode(tt)
+  # Mean of time(ms) token for the inner 80%: 37.822213768959045
   plt.plot(times)
-
+  ```
+  ![](original.png)
+  ```py
   global decode_one_token
   decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
   times = timeit_model_decode(tt)
+  # Mean of time(ms) token for the inner 80%: 8.137491345405579
   plt.plot(times)
   ```
+  ![](compile.png)
   ```py
-  # 7B Speculative, k=8
+  # Speculative test, k=8
   times = timeit_model_decode(tt, num_tokens=8)
+  # Mean of time(ms) token for the inner 80%: 17.827391624450684
   plt.plot(times)
   ```
+  ![](speculative.png)
 ## Int8 Quant
   ```py
   import torch
@@ -168,21 +148,29 @@
 
   pp = tt.blocks[0].self_attn.q_proj.weight
   print(pp.device, pp.dtype, pp.shape)
+  # cuda:0 torch.int8 torch.Size([2048, 2048])
 
   """ Run """
   times = timeit_model_decode(tt)
+  # Mean of time(ms) token for the inner 80%: 48.092254996299744
   plt.plot(times)
-
+  ```
+  ![](int8.png)
+  ```py
   global decode_one_token
   decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
   times = timeit_model_decode(tt)
+  # Mean of time(ms) token for the inner 80%: 5.571886897087097
   plt.plot(times)
   ```
+  ![](int8_compile.png)
   ```py
-  # 7B Speculative, k=8
+  # Speculative test, k=8
   times = timeit_model_decode(tt, num_tokens=8)
+  # Mean of time(ms) token for the inner 80%: 30.911296606063843
   plt.plot(times)
   ```
+  ![](int8_speculative.png)
 ## Int4 quant
   ```py
   import torch
