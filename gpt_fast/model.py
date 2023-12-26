@@ -64,7 +64,7 @@ class Transformer(nn.Module):
 
     def forward(self, idx: Tensor, input_pos=None) -> Tensor:
         assert self.freqs_cis is not None, "Caches must be initialized first"
-        mask = self.causal_mask[None, None, input_pos, input_pos]
+        mask = self.causal_mask[None, None, input_pos]
         freqs_cis = self.freqs_cis[input_pos]
         x = self.embed_tokens(idx)
 
@@ -124,9 +124,7 @@ class Attention(nn.Module):
         # print(">>>> q.shape:", q.shape, "k.shape:", k.shape, "v.shape:", v.shape, "mask.shape:", mask.shape)
         # y = F.scaled_dot_product_attention(q.contiguous(), k.contiguous(), v.contiguous(), attn_mask=mask.contiguous(), dropout_p=0.0)
         y = F.softmax((q @ k.transpose(2, 3)) / (float(self.head_dim) ** 0.5) * mask, dim=-1) @ v
-
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
-
         y = self.o_proj(y)
         return y
 
@@ -168,16 +166,9 @@ def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000) -> Tensor
 def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
     xshaped = x.float().reshape(*x.shape[:-1], 2, -1).permute([0, 1, 2, 4, 3])
     freqs_cis = freqs_cis.view(1, xshaped.size(1), 1, xshaped.size(3), 2)
-    x_out2 = torch.stack(
-        [
-            xshaped[..., 0] * freqs_cis[..., 0] - xshaped[..., 1] * freqs_cis[..., 1],
-            xshaped[..., 1] * freqs_cis[..., 0] + xshaped[..., 0] * freqs_cis[..., 1],
-        ],
-        -2,
-    )
-
-    x_out2 = x_out2.flatten(3)
-    return x_out2.type_as(x)
+    left = xshaped[..., 0] * freqs_cis[..., 0] - xshaped[..., 1] * freqs_cis[..., 1]
+    right = xshaped[..., 1] * freqs_cis[..., 0] + xshaped[..., 0] * freqs_cis[..., 1]
+    return torch.stack([left, right], -2).flatten(3).type_as(x)
 
 
 def LLaMA2_1B(vocab_size=32003, **kwargs):

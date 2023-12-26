@@ -20,9 +20,9 @@ if hasattr(torch._inductor.config, "triton") and hasattr(torch._inductor.config.
 if hasattr(torch._inductor.config, "fx_graph_cache"):
     torch._inductor.config.fx_graph_cache = True # Experimental feature to reduce compilation times, will be on by default in future
 
-GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "cpu"
+GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]) >= 0 else "cpu"
 GLOBAL_PRECISSION = torch.float16 if GLOBAL_DEVICE == "cuda" else torch.float32
-GLOBAL_DIST_BACKEND = "nccl" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "gloo"
+GLOBAL_DIST_BACKEND = "nccl" if GLOBAL_DEVICE == "cuda" else "gloo"
 GLOBAL_CONTEXT = torch.autocast(device_type=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION)
 
 def maybe_init_dist():
@@ -36,8 +36,7 @@ def maybe_init_dist():
     except KeyError:
         return None  # not run via torchrun, no-op
 
-    backend = "nccl" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "gloo"
-    torch.distributed.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    torch.distributed.init_process_group(backend=GLOBAL_DIST_BACKEND, rank=rank, world_size=world_size)
     return rank
 
 
@@ -110,25 +109,32 @@ def decode_one_token(model, inputs, input_pos):
 if __name__ == "__main__":
     """ Quant -> Tensor Parallel -> To device and precission -> Compile -> Speculative """
     maybe_init_dist()
-
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
     LOCAL_WORLD_SIZE = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    LOCAL_DEVICE = "{}:{}".format(GLOBAL_DEVICE, LOCAL_RANK)
+    print(">>>> LOCAL_DEVICE:", LOCAL_DEVICE)
 
-    tt = model.LLaMA2_1B()
+    tt, pretrained = model.LLaMA2_1B(), "llama2_1b.pt"
+    # tt, pretrained = model.LLaMA2_7B(), "llama2_7b_chat_hf.pt"
+    use_quant = True
     quant_save_path = (tt.name if hasattr(tt, 'name') else tt.__class__.__name__) + '_int8.pth'
-    if os.path.exists("llama2_1b.pt") and not os.path.exists(quant_save_path):
-        ss = torch.load('llama2_1b.pt')
+    if os.path.exists(pretrained) and (not use_quant or (use_quant and not os.path.exists(quant_save_path))):
+        print(">>>> Load pretrained from:", pretrained)
+        ss = torch.load(pretrained)
         tt.load_state_dict({ii: ss['state_dict'][('_'.join(ii.split('.')[:-1]) + '.' + ii.split('.')[-1])] for ii in tt.state_dict().keys()})
-    # tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
+    # tt = tt.to(device=LOCAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
 
-    print(">>>> Quant")
-    if not os.path.exists(quant_save_path):
-        quantized_state_dict = int8_quant.create_quantized_state_dict(tt)
-        torch.save(quantized_state_dict, quant_save_path)
-    else:
-        quantized_state_dict = torch.load(quant_save_path)
-    int8_quant.replace_linear_weight_only_int8_per_channel(tt)
-    tt.load_state_dict(quantized_state_dict, assign=True)
+    if use_quant:
+        print(">>>> Quant")
+        if not os.path.exists(quant_save_path):
+            print(">>>> Run int quant")
+            quantized_state_dict = int8_quant.create_quantized_state_dict(tt)
+            torch.save(quantized_state_dict, quant_save_path)
+        else:
+            print(">>>> Load quant pretrained from:", quant_save_path)
+            quantized_state_dict = torch.load(quant_save_path)
+        int8_quant.replace_linear_weight_only_int8_per_channel(tt)
+        tt.load_state_dict(quantized_state_dict, assign=True)
 
     if LOCAL_WORLD_SIZE >= 2:
         print(">>>> Tensor Parallel")
@@ -138,14 +144,15 @@ if __name__ == "__main__":
         print("     [After] Total parameters:", sum([int(np.prod(ii.shape)) for ii in tt.state_dict().values()]))
 
     print(">>>> To device and precission")
-    tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
+    tt = tt.to(device=LOCAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
 
-    print(">>>> compile") if LOCAL_RANK == 0 else None
-    # global decode_one_token
-    decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
+    if hasattr(torch, "compile") and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] > 6:
+        print(">>>> compile") if LOCAL_RANK == 0 else None
+        # global decode_one_token
+        decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
 
     repeat = 100
-    with torch.no_grad(), torch.device(GLOBAL_DEVICE):
+    with torch.no_grad(), torch.device(LOCAL_DEVICE):
         tt.setup_caches(max_batch_size=1, max_seq_length=2048)
         print(">>>> Warmup")
         for id in range(5):
@@ -163,3 +170,5 @@ if __name__ == "__main__":
             times.append((time.time() - ss) * 1000)
     print("Mean of time(ms) token for the inner 80%:", np.mean(sorted(times)[len(times) // 10: -len(times) // 10]))
     # plt.plot(times)
+    if GLOBAL_DEVICE == "cuda":
+        torch.cuda.synchronize()
