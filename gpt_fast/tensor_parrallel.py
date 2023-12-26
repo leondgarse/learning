@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import torch._dynamo.config
 import torch._inductor.config
+
 try:
     from torch.distributed._functional_collectives import all_reduce
 except:
@@ -18,12 +19,13 @@ if hasattr(torch._inductor.config, "coordinate_descent_tuning"):
 if hasattr(torch._inductor.config, "triton") and hasattr(torch._inductor.config.triton, "unique_kernel_names"):
     torch._inductor.config.triton.unique_kernel_names = True
 if hasattr(torch._inductor.config, "fx_graph_cache"):
-    torch._inductor.config.fx_graph_cache = True # Experimental feature to reduce compilation times, will be on by default in future
+    torch._inductor.config.fx_graph_cache = True  # Experimental feature to reduce compilation times, will be on by default in future
 
 GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]) >= 0 else "cpu"
 GLOBAL_PRECISSION = torch.float16 if GLOBAL_DEVICE == "cuda" else torch.float32
 GLOBAL_DIST_BACKEND = "nccl" if GLOBAL_DEVICE == "cuda" else "gloo"
 GLOBAL_CONTEXT = torch.autocast(device_type=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION)
+
 
 def maybe_init_dist():
     try:
@@ -64,6 +66,7 @@ def apply_tensor_parallel_kecam(model):
             layer.module.weight = torch.nn.Parameter(shard_weights, requires_grad=False)
             layer.module.out_features //= LOCAL_WORLD_SIZE
 
+
 def apply_tp_linear_inplace(linear_layer, is_split_out=False):
     dim = 1 if is_split_out else 0
     shard_weights = torch.tensor_split(linear_layer.weight, LOCAL_WORLD_SIZE, dim=dim)[LOCAL_RANK]
@@ -76,6 +79,7 @@ def apply_tp_linear_inplace(linear_layer, is_split_out=False):
         linear_layer.out_features //= LOCAL_WORLD_SIZE
     else:
         linear_layer.in_features //= LOCAL_WORLD_SIZE
+
 
 def apply_tensor_parallel_torch(model):
     model.n_head //= LOCAL_WORLD_SIZE
@@ -106,7 +110,22 @@ def decode_one_token(model, inputs, input_pos):
         torch.cuda.synchronize()
     return out
 
+
+def parse_arguments(argv):
+    import argparse
+
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("-m", "--model", type=str, default="LLaMA2_1B", help="model name, LLaMA2_1B or LLaMA2_7B")
+    parser.add_argument("-q", "--use_quant", action="store_true", help="Use int8 quant")
+    args = parser.parse_known_args(argv)[0]
+    return args
+
+
 if __name__ == "__main__":
+    import sys
+
+    args = parse_arguments(sys.argv[1:])
+
     """ Quant -> Tensor Parallel -> To device and precission -> Compile -> Speculative """
     maybe_init_dist()
     LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
@@ -114,17 +133,17 @@ if __name__ == "__main__":
     LOCAL_DEVICE = "{}:{}".format(GLOBAL_DEVICE, LOCAL_RANK)
     print(">>>> LOCAL_DEVICE:", LOCAL_DEVICE)
 
-    tt, pretrained = model.LLaMA2_1B(), "llama2_1b.pt"
-    # tt, pretrained = model.LLaMA2_7B(), "llama2_7b_chat_hf.pt"
-    use_quant = True
-    quant_save_path = (tt.name if hasattr(tt, 'name') else tt.__class__.__name__) + '_int8.pth'
-    if os.path.exists(pretrained) and (not use_quant or (use_quant and not os.path.exists(quant_save_path))):
+    if args.model.lower().endswith("7b"):
+        tt, pretrained = model.LLaMA2_7B(), "llama2_7b_chat_hf.pt"
+    else:
+        tt, pretrained = model.LLaMA2_1B(), "llama2_1b.pt"
+    quant_save_path = (tt.name if hasattr(tt, "name") else tt.__class__.__name__) + "_int8.pth"
+    if os.path.exists(pretrained) and (not args.use_quant or (args.use_quant and not os.path.exists(quant_save_path))):
         print(">>>> Load pretrained from:", pretrained)
         ss = torch.load(pretrained)
-        tt.load_state_dict({ii: ss['state_dict'][('_'.join(ii.split('.')[:-1]) + '.' + ii.split('.')[-1])] for ii in tt.state_dict().keys()})
-    # tt = tt.to(device=LOCAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
+        tt.load_state_dict({ii: ss["state_dict"][("_".join(ii.split(".")[:-1]) + "." + ii.split(".")[-1])] for ii in tt.state_dict().keys()})
 
-    if use_quant:
+    if args.use_quant:
         print(">>>> Quant")
         if not os.path.exists(quant_save_path):
             print(">>>> Run int quant")
@@ -168,7 +187,7 @@ if __name__ == "__main__":
             ss = time.time()
             out = decode_one_token(tt, inputs, input_pos)
             times.append((time.time() - ss) * 1000)
-    print("Mean of time(ms) token for the inner 80%:", np.mean(sorted(times)[len(times) // 10: -len(times) // 10]))
+    print("Mean of time(ms) token for the inner 80%:", np.mean(sorted(times)[len(times) // 10 : -len(times) // 10]))
     # plt.plot(times)
     if GLOBAL_DEVICE == "cuda":
         torch.cuda.synchronize()

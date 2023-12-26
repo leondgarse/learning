@@ -1,5 +1,6 @@
 import torch
 
+
 def dynamically_quantize_per_channel(x, quant_min, quant_max, target_dtype):
     # assumes symmetric quantization, assumes axis == 0, assumes dense memory format
     # default setup for affine quantization of activations
@@ -27,14 +28,15 @@ def dynamically_quantize_per_channel(x, quant_min, quant_max, target_dtype):
 
     return quant, scales, zero_points
 
+
 class WeightOnlyInt8Linear(torch.nn.Module):
-    __constants__ = ['in_features', 'out_features']
+    __constants__ = ["in_features", "out_features"]
     in_features: int
     out_features: int
     weight: torch.Tensor
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None) -> None:
-        factory_kwargs = {'device': device, 'dtype': dtype}
+        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -46,6 +48,7 @@ class WeightOnlyInt8Linear(torch.nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return torch.functional.F.linear(input, self.weight.to(dtype=input.dtype)) * self.scales
 
+
 def create_quantized_state_dict(model):
     cur_state_dict = model.state_dict()
     for fqn, mod in model.named_modules():
@@ -55,6 +58,7 @@ def create_quantized_state_dict(model):
             cur_state_dict[f"{fqn}.scales"] = scales.to(mod.weight.dtype)
 
     return cur_state_dict
+
 
 def replace_linear_weight_only_int8_per_channel(module):
     for name, child in module.named_children():

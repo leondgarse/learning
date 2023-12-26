@@ -35,6 +35,13 @@
   os.rename(os.path.realpath(aa), os.path.basename(aa))  # Move to current dir
   ```
   ```py
+  from keras_cv_attention_models import llama2
+  _ = llama2.convert_huggingface_weights_to_h5("pytorch_model-00001-of-00002.bin", to_fp16=True)
+  # >>>> Save to: pytorch_model-00001-of-00002.h5
+  _ = llama2.convert_huggingface_weights_to_h5("pytorch_model-00002-of-00002.bin", to_fp16=True)
+  # >>>> Save to: pytorch_model-00002-of-00002.h5
+  ```
+  ```py
   import os
   os.environ['KECAM_BACKEND'] = 'torch'
 
@@ -95,6 +102,7 @@
   GLOBAL_DIST_BACKEND = "nccl" if GLOBAL_DEVICE =="cuda" else "gloo"
   GLOBAL_CONTEXT = torch.autocast(device_type=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION)
 
+  from model import LLaMA2_1B, LLaMA2_7B
   tt = LLaMA2_1B()
   ss = torch.load('llama2_1b.pt')
   tt.load_state_dict({ii: ss['state_dict'][('_'.join(ii.split('.')[:-1]) + '.' + ii.split('.')[-1])] for ii in tt.state_dict().keys()})
@@ -111,14 +119,14 @@
           print(">>>> Warmup")
           for id in range(5):
               inputs = torch.randint(low=0, high=32000, size=[1, num_tokens])
-              input_pos = torch.range(id * num_tokens, (id + 1) * num_tokens, dtype=torch.int64)
+              input_pos = torch.arange(id * num_tokens, (id + 1) * num_tokens, dtype=torch.int64)
               print(decode_one_token(model, inputs, input_pos).shape)
 
           print(">>>> Repeat test")
           times = []
           for id in range(repeat):
               inputs = torch.randint(low=0, high=32000, size=[1, num_tokens])
-              input_pos = torch.range(id * num_tokens, (id + 1) * num_tokens, dtype=torch.int64)
+              input_pos = torch.arange(id * num_tokens, (id + 1) * num_tokens, dtype=torch.int64)
               ss = time.time()
               out = decode_one_token(model, inputs, input_pos)
               times.append((time.time() - ss) * 1000)
@@ -138,7 +146,8 @@
   ```
   ```py
   # 7B Speculative, k=8
-  timeit_model_decode(tt, num_tokens=8)
+  times = timeit_model_decode(tt, num_tokens=8)
+  plt.plot(times)
   ```
 ## Int8 Quant
   ```py
@@ -157,10 +166,10 @@
   tt.load_state_dict(quantized_state_dict, assign=True)
   tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
 
-  """ Run """
   pp = tt.blocks[0].self_attn.q_proj.weight
   print(pp.device, pp.dtype, pp.shape)
 
+  """ Run """
   times = timeit_model_decode(tt)
   plt.plot(times)
 
@@ -171,7 +180,8 @@
   ```
   ```py
   # 7B Speculative, k=8
-  timeit_model_decode(tt, num_tokens=8)
+  times = timeit_model_decode(tt, num_tokens=8)
+  plt.plot(times)
   ```
 ## Int4 quant
   ```py
@@ -182,7 +192,7 @@
   tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
   groupsize = 128
 
-  quant_save_path = (model.name if hasattr(model, 'name') else model.__class__.__name__) + '_int4.g{}.pth'.format(groupsize)
+  quant_save_path = (tt.name if hasattr(tt, 'name') else tt.__class__.__name__) + '_int4.g{}.pth'.format(groupsize)
   if not os.path.exists(quant_save_path):
       print(">>>> Run int quant")
       quantized_state_dict = int4_quant.create_quantized_state_dict(tt)
@@ -194,10 +204,10 @@
   tt.load_state_dict(quantized_state_dict, assign=True)
   tt = tt.to(device=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION).eval()
 
-  """ Run """
   pp = tt.blocks[0].self_attn.q_proj.weight
   print(pp.device, pp.dtype, pp.shape)
 
+  """ Run """
   times = timeit_model_decode(tt)
   plt.plot(times)
 
@@ -208,11 +218,8 @@
   ```
   ```py
   # 7B Speculative, k=8
-  timeit_model_decode(tt, num_tokens=8)
-  ```
-## tensor parallel
-  ```sh
-  CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 tensor_parallel.py
+  times = timeit_model_decode(tt, num_tokens=8)
+  plt.plot(times)
   ```
 ## Speculative
   ```py
@@ -229,8 +236,8 @@
   min_vocab_size = min(draft.output_shape[-1], target.output_shape[-1])
 
   inputs = "Q: Is it possible to learn Spanish in 21 days? A:"
-  draft.run_prediction(inputs, max_new_token=10, top_k=1)
-  target.run_prediction(inputs, max_new_token=10, top_k=1)
+  draft.run_prediction(inputs, max_new_tokens=10, top_k=1)
+  target.run_prediction(inputs, max_new_tokens=10, top_k=1)
 
   speculate_k = 8
   temperature = 0.8
@@ -265,6 +272,10 @@
       target_prob = target_probs[target_start_pos + accept_length, :min_vocab_size]
       next_token = (target_prob - draft_prob).argmax()
       accept_tokens = np.concatenate([draft_tokens[:accept_length], next_token[None]])
+  ```
+## Tensor Parallel
+  ```sh
+  CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 tensor_parallel.py
   ```
 ***
 

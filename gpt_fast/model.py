@@ -11,8 +11,8 @@ class KVCache(nn.Module):
     def __init__(self, max_batch_size, max_seq_length, n_heads, head_dim, dtype=torch.float16):
         super().__init__()
         cache_shape = (max_batch_size, n_heads, max_seq_length, head_dim)
-        self.register_buffer('k_cache', torch.zeros(cache_shape, dtype=dtype))
-        self.register_buffer('v_cache', torch.zeros(cache_shape, dtype=dtype))
+        self.register_buffer("k_cache", torch.zeros(cache_shape, dtype=dtype))
+        self.register_buffer("v_cache", torch.zeros(cache_shape, dtype=dtype))
 
     def update(self, input_pos, k_val, v_val):
         # print(f"{input_pos.shape[0] = }, {k_val.shape[2] = }")
@@ -173,11 +173,11 @@ def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
 
 def LLaMA2_1B(vocab_size=32003, **kwargs):
     model = Transformer(n_layer=22, vocab_size=vocab_size, block_size=8192, rope_base=10000, dim=2048, n_head=32, n_local_heads=4, **kwargs)
-    model.name = 'llama2_1b'
+    model.name = "llama2_1b"
     return model
 
 
 def LLaMA2_7B(vocab_size=32000, **kwargs):
     model = Transformer(n_layer=32, vocab_size=vocab_size, block_size=16384, rope_base=10000, dim=4096, n_head=32, n_local_heads=-1, **kwargs)
-    model.name = 'llama2_7b'
+    model.name = "llama2_7b"
     return model
