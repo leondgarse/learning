@@ -113,7 +113,7 @@
   # Mean of time(ms) token for the inner 80%: 37.822213768959045
   plt.plot(times)
   ```
-  ![](original.png)
+  ![](images/original.png)
   ```py
   global decode_one_token
   decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
@@ -121,14 +121,14 @@
   # Mean of time(ms) token for the inner 80%: 8.137491345405579
   plt.plot(times)
   ```
-  ![](compile.png)
+  ![](images/compile.png)
   ```py
   # Speculative test, k=8
   times = timeit_model_decode(tt, num_tokens=8)
   # Mean of time(ms) token for the inner 80%: 17.827391624450684
   plt.plot(times)
   ```
-  ![](speculative.png)
+  ![](images/speculative.png)
 ## Int8 Quant
   ```py
   import torch
@@ -155,7 +155,7 @@
   # Mean of time(ms) token for the inner 80%: 48.092254996299744
   plt.plot(times)
   ```
-  ![](int8.png)
+  ![](images/int8.png)
   ```py
   global decode_one_token
   decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
@@ -163,14 +163,14 @@
   # Mean of time(ms) token for the inner 80%: 5.571886897087097
   plt.plot(times)
   ```
-  ![](int8_compile.png)
+  ![](images/int8_compile.png)
   ```py
   # Speculative test, k=8
   times = timeit_model_decode(tt, num_tokens=8)
   # Mean of time(ms) token for the inner 80%: 30.911296606063843
   plt.plot(times)
   ```
-  ![](int8_speculative.png)
+  ![](images/int8_speculative.png)
 ## Int4 quant
   ```py
   import torch
@@ -289,7 +289,7 @@
 
     **Speculative k=8 (assume all acepted)**: `(72.03 + 8.11 * 8) / 9 == 15.21 ms/token, 65.75 tokens/s`
 
-    ![](gpt_fast.png)
+    ![](images/gpt_fast.png)
   - **Tensor Parallel, P100 + torch 2.3.0.dev202321222+cu118**
     | LLaMA2_7B                      | ms/token    | tokens/s | Speedup |
     | ------------------------------ | ----------- | -------- | ------- |
