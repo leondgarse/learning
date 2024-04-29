@@ -1,8 +1,8 @@
 import os
 import torch
 
-GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")) >= 0 else "cpu"
-GLOBAL_PRECISSION = torch.float16 if GLOBAL_DEVICE == "cuda" else torch.float32
+GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]) >= 0 else "cpu"
+GLOBAL_PRECISSION = torch.bfloat16 if GLOBAL_DEVICE == "cuda" else torch.float32
 
 
 def find_multiple(n: int, k: int) -> int:
@@ -111,7 +111,7 @@ def linear_forward_int4(x, weight_int4pack, scales_and_zeros, out_features, grou
     origin_x_size = x.size()
     x = x.reshape(-1, origin_x_size[-1])
     c = torch.ops.aten._weight_int4pack_mm(x, weight_int4pack, groupsize, scales_and_zeros)
-    new_shape = origin_x_size[:-1] + (out_features,)
+    new_shape = origin_x_size[:-1] + (-1,)
     c = c.reshape(new_shape)
     return c
 
@@ -161,7 +161,7 @@ class WeightOnlyInt4Linear(torch.nn.Module):
 
 def replace_linear_int4(module, groupsize=128, inner_k_tiles=8, padding=True):
     for name, child in module.named_children():
-        if not isinstance(child, nn.Linear):
+        if not isinstance(child, torch.nn.Linear):
             replace_linear_int4(child, groupsize, inner_k_tiles, padding)
             continue
 

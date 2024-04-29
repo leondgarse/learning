@@ -264,6 +264,8 @@
 ## Tensor Parallel
   ```sh
   CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 tensor_parallel.py
+  CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 tensor_parallel.py -q
+  CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 tensor_parallel.py -q --quant4 -m 7b
   ```
 ***
 
@@ -289,7 +291,7 @@
 
     **Speculative k=8 (assume all acepted)**: `(72.03 + 8.11 * 8) / 9 == 15.21 ms/token, 65.75 tokens/s`
 
-    ![](images/gpt_fast.png)
+    ![](images/gpt_fast_T4.png)
   - **Tensor Parallel, P100 + torch 2.3.0.dev202321222+cu118**
     | LLaMA2_7B                      | ms/token    | tokens/s | Speedup |
     | ------------------------------ | ----------- | -------- | ------- |
@@ -298,18 +300,60 @@
     |                                |             |          |         |
     | int8 quant                     | 167.43      | 5.97     |         |
     | int8 quant + Tensor Parallel 2 | 99.74       | 10.03    | 67.87%  |
+
+  - **A100 + LLaMA2_1B + torch 2.4.0.dev20240425+cu121**
+
+    | LLaMA2_1B                          | ms/token | tokens/s | Speedup      |
+    | ---------------------------------- | -------- | -------- | ------------ |
+    | original                           | 32.36    | 30.90    |              |
+    | compile                            | 1.32     | 757.58   | 2351.52%     |
+    | original + Tensor Parallel 2       | 0.46     | 2173.91  | 6934.78%     |
+    | original + Tensor Parallel 4       | 0.46     | 2173.91  | 6934.78%     |
+    | int8 quant                         | 38.83    | 25.75    | -16.66%      |
+    | int8 quant + compile               | 1.07     | 934.58   | 2924.30%     |
+    | int8 quant + Tensor Parallel 2     | 0.44     | 2272.73  | **7254.55%** |
+    | int8 quant + Tensor Parallel 4     | 0.49     | 2040.82  | 6504.08%     |
+    | int4 quant                         | 35.23    | 28.38    | -8.15%       |
+    | int4 quant + compile               | 1.08     | 925.93   | 2896.30%     |
+    | int4 quant + Tensor Parallel 2     | 0.44     | 2272.73  | **7254.55%** |
+    | int4 quant + Tensor Parallel 4     | 0.49     | 2040.82  | 6504.08%     |
+    | input [1, 8], compile              | 3.03     | 330.03   | 967.99%      |
+    | input [1, 8], int8 quant + compile | 4.17     | 239.81   | 676.02%      |
+    | input [1, 8], int4 quant + compile | 1.97     | 507.61   | 1542.64%     |
+
+    | LLaMA2_7B                                    | ms/token  | tokens/s | Speedup     |
+    | -------------------------------------------- | --------- | -------- | ----------- |
+    | original                                     | 44.82     | 22.31    |             |
+    | compile                                      | 8.45      | 118.34   | 430.41%     |
+    | compile + Tensor Parallel 2                  | 6.42      | 155.76   | 598.13%     |
+    | compile + Tensor Parallel 4                  | 6.16      | 162.34   | 627.60%     |
+    | int8 quant                                   | 55.35     | 18.07    | -19.02%     |
+    | int8 quant + compile                         | 5.31      | 188.32   | 744.07%     |
+    | int8 quant + Tensor Parallel 2               | 4.85      | 206.19   | 824.12%     |
+    | int8 quant + Tensor Parallel 4               | 5.33      | 187.62   | 740.90%     |
+    | int4 quant                                   | 50.45     | 19.82    | -11.16%     |
+    | int4 quant + compile                         | 4.22      | 236.97   | **962.09%** |
+    | int4 quant + Tensor Parallel 2               | 4.97      | 201.21   | 801.81%     |
+    | input [1, 8], compile                        | 9.41      | 106.27   | 376.30%     |
+    | input [1, 8], int8 quant + compile           | 23.63     | 42.32    | 89.67%      |
+    | input [1, 8], int4 quant + compile           | 8.07      | 123.92   | 455.39%     |
+    | input [1, 8], int4 quant + Tensor Parallel 2 | 1.6 [???] | 625.00   | 2701.25%    |
+
+    **Speculative k=8 (assume all acepted)**: `(9.41 + 1.07 * 8) / 9 == 2.0 ms/token, 500 tokens/s`
+
+    ![](images/gpt_fast_A100.png)
   - **Plot**
     ```py
-    aa = [63.64, 47.23, 209.18, 30.37, 72.03, 156.67, 15.21]
+    aa = [44.82, 8.45, 6.42, 6.16, 55.35, 5.31, 4.85, 5.33, 50.45, 4.22, 4.97, 9.41, 23.63, 8.07, 1.6]
     bb = [1000 / ii for ii in aa]
     cc = [(ii - bb[0]) / bb[0] for ii in bb[1:]]
     print("\n".join(["{:.2f}".format(ii) for ii in bb]))
     print("\n".join(["{:.2f}%".format(ii * 100) for ii in cc]))
     ```
     ```py
-    aa = [27.89, 123.30, 22.71, 177.62]
-    names = ["original", "compile", "int8 quant", "int8 quant + compile"]
-    plt.bar(names, height=aa, width=[0.4] * len(aa), label="LLaMA2_1B T4 (tokens/s)", alpha=0.8)
+    aa = [30.90, 757.58, 934.58, 2272.73, 925.93, 2272.73]
+    names = ["original", "compile", "int8 + compile", "int8 + TP 2", "int4 + compile", "int4 + TP 2"]
+    plt.bar(names, height=aa, width=[0.4] * len(aa), label="LLaMA2_1B A100 (tokens/s)", alpha=0.8)
     for id, ii in enumerate(aa):
         text = "{} T/s".format(ii)
         if id > 0:
@@ -317,8 +361,8 @@
             text += "\n+{:.2f}%".format(increase) if increase > 0 else "\n{:.2f}%".format(increase)
         plt.text(id, ii, text, horizontalalignment="center")
 
-    aa = [15.71, 21.17, 4.78, 32.93, 65.75]
-    names = ["original", "compile", "int8 quant", "int8 quant + compile", "Speculative k=8"]
+    aa = [22.31, 118.34, 188.32, 206.19, 236.97, 201.21, 500]
+    names = ["original", "compile", "int8 + compile", "int8 + TP 2", "int4 + compile", "int4 + TP 2", "Speculative k=8"]
     plt.bar(names, height=aa, width=[0.4] * len(aa), label="LLaMA2_1B T4 (tokens/s)", alpha=0.8)
     for id, ii in enumerate(aa):
         text = "{} T/s".format(ii)

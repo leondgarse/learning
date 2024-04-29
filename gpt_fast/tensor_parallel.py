@@ -11,7 +11,7 @@ except:
     from torch.distributed import all_reduce
 # import matplotlib.pyplot as plt
 
-import model, int8_quant
+import model, int8_quant, int4_quant
 
 
 if hasattr(torch._inductor.config, "coordinate_descent_tuning"):
@@ -22,7 +22,7 @@ if hasattr(torch._inductor.config, "fx_graph_cache"):
     torch._inductor.config.fx_graph_cache = True  # Experimental feature to reduce compilation times, will be on by default in future
 
 GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() and int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]) >= 0 else "cpu"
-GLOBAL_PRECISSION = torch.float16 if GLOBAL_DEVICE == "cuda" else torch.float32
+GLOBAL_PRECISSION = torch.bfloat16 if GLOBAL_DEVICE == "cuda" else torch.float32
 GLOBAL_DIST_BACKEND = "nccl" if GLOBAL_DEVICE == "cuda" else "gloo"
 GLOBAL_CONTEXT = torch.autocast(device_type=GLOBAL_DEVICE, dtype=GLOBAL_PRECISSION)
 
@@ -74,6 +74,8 @@ def apply_tp_linear_inplace(linear_layer, is_split_out=False):
 
     if hasattr(linear_layer, "scales") and not is_split_out:
         linear_layer.scales = torch.tensor_split(linear_layer.scales, LOCAL_WORLD_SIZE, dim=dim)[LOCAL_RANK]
+    if hasattr(linear_layer, "scales_and_zeros"):  # INT4 quant, No matter in or out
+        linear_layer.scales_and_zeros = torch.tensor_split(linear_layer.scales_and_zeros, LOCAL_WORLD_SIZE, dim=1 - dim)[LOCAL_RANK]
 
     if is_split_out:
         linear_layer.out_features //= LOCAL_WORLD_SIZE
@@ -117,6 +119,8 @@ def parse_arguments(argv):
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("-m", "--model", type=str, default="LLaMA2_1B", help="model name, LLaMA2_1B or LLaMA2_7B")
     parser.add_argument("-q", "--use_quant", action="store_true", help="Use int8 quant")
+    parser.add_argument("--quant4", action="store_true", help="Use int4 quant, work together with `use_quant`")
+    parser.add_argument("-s", "--speculate_k", type=int, default=1, help="speculate k value")
     args = parser.parse_known_args(argv)[0]
     return args
 
@@ -134,19 +138,30 @@ if __name__ == "__main__":
     print(">>>> LOCAL_DEVICE:", LOCAL_DEVICE)
 
     if args.model.lower().endswith("7b"):
-        tt, pretrained = model.LLaMA2_7B(), "llama2_7b_chat_hf.pt"
+        tt, pretrained, groupsize = model.LLaMA2_7B(), "llama2_7b_chat_hf.pt", 128
     else:
-        tt, pretrained = model.LLaMA2_1B(), "llama2_1b.pt"
-    quant_save_path = (tt.name if hasattr(tt, "name") else tt.__class__.__name__) + "_int8.pth"
+        tt, pretrained, groupsize = model.LLaMA2_1B(vocab_size=32000 if args.use_quant else 32003), "llama2_1b.pt", 32
+    quant_save_path = (tt.name if hasattr(tt, "name") else tt.__class__.__name__) + ("_int4.pth" if args.quant4 else "_int8.pth")
     if os.path.exists(pretrained) and (not args.use_quant or (args.use_quant and not os.path.exists(quant_save_path))):
         print(">>>> Load pretrained from:", pretrained)
         ss = torch.load(pretrained)
         tt.load_state_dict({ii: ss["state_dict"][("_".join(ii.split(".")[:-1]) + "." + ii.split(".")[-1])] for ii in tt.state_dict().keys()})
 
-    if args.use_quant:
-        print(">>>> Quant")
+    if args.use_quant and args.quant4:
+        print(">>>> Quant INT4")
         if not os.path.exists(quant_save_path):
-            print(">>>> Run int quant")
+            print(">>>> Run int4 quant")
+            quantized_state_dict = int4_quant.create_quantized_state_dict(tt, groupsize=groupsize)
+            torch.save(quantized_state_dict, quant_save_path)
+        else:
+            print(">>>> Load quant pretrained from:", quant_save_path)
+            quantized_state_dict = torch.load(quant_save_path)
+        int4_quant.replace_linear_int4(tt, groupsize=groupsize)
+        tt.load_state_dict(quantized_state_dict, assign=True)
+    elif args.use_quant:
+        print(">>>> Quant INT8")
+        if not os.path.exists(quant_save_path):
+            print(">>>> Run int8 quant")
             quantized_state_dict = int8_quant.create_quantized_state_dict(tt)
             torch.save(quantized_state_dict, quant_save_path)
         else:
@@ -175,15 +190,15 @@ if __name__ == "__main__":
         tt.setup_caches(max_batch_size=1, max_seq_length=2048, dtype=GLOBAL_PRECISSION)
         print(">>>> Warmup")
         for id in range(5):
-            inputs = torch.randint(low=0, high=32000, size=[1, 1])
-            input_pos = torch.ones([1], dtype=torch.int64) + id
+            inputs = torch.randint(low=0, high=32000, size=[1, args.speculate_k])
+            input_pos = torch.arange(id * args.speculate_k, (id + 1) * args.speculate_k, dtype=torch.int64)
             print(decode_one_token(tt, inputs, input_pos).shape)
 
         print(">>>> Repeat test")
         times = []
         for id in range(repeat):
-            inputs = torch.randint(low=0, high=32000, size=[1, 1])
-            input_pos = torch.ones([1], dtype=torch.int64) + id
+            inputs = torch.randint(low=0, high=32000, size=[1, args.speculate_k])
+            input_pos = torch.arange(id * args.speculate_k, (id + 1) * args.speculate_k, dtype=torch.int64)
             ss = time.time()
             out = decode_one_token(tt, inputs, input_pos)
             times.append((time.time() - ss) * 1000)
